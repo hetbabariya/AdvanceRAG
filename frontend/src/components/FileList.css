@@ -1,0 +1,89 @@
+/* ── File List ──────────────────────────────────────────────────────── */
+.file-list {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.file-list-empty {
+    padding: 16px 8px;
+    text-align: center;
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+}
+
+.file-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 8px;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background 0.15s;
+    color: var(--text-primary);
+    min-width: 0;
+}
+
+.file-item:hover {
+    background: var(--hover-color);
+}
+
+.file-item.selected {
+    background: #e5e5e5;
+    font-weight: 500;
+}
+
+.file-icon {
+    flex-shrink: 0;
+    width: 18px;
+    height: 18px;
+    color: var(--text-secondary);
+    display: flex;
+    align-items: center;
+}
+
+.file-icon svg {
+    width: 16px;
+    height: 16px;
+}
+
+.file-name {
+    flex: 1;
+    font-size: 0.84rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    line-height: 1.3;
+}
+
+/* Delete button — hidden until hover */
+.file-delete {
+    flex-shrink: 0;
+    width: 22px;
+    height: 22px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    background: transparent;
+    color: var(--text-secondary);
+    border-radius: 4px;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.15s, background 0.15s, color 0.15s;
+    padding: 0;
+}
+
+.file-item:hover .file-delete {
+    opacity: 1;
+}
+
+.file-delete:hover:not(:disabled) {
+    background: rgba(239, 68, 68, 0.1);
+    color: #ef4444;
+}
+
+.file-delete svg {
+    width: 13px;
+    height: 13px;
+}

@@ -1,0 +1,280 @@
+/* ── Citation Badge ─────────────────────────────────────────────────── */
+.citation-ref {
+    display: inline-flex;
+    align-items: center;
+    cursor: pointer;
+    font-size: 0.7rem;
+    font-weight: 700;
+    color: #10a37f;
+    background: rgba(16, 163, 127, 0.12);
+    border: 1px solid rgba(16, 163, 127, 0.3);
+    border-radius: 4px;
+    padding: 1px 5px;
+    margin: 0 2px;
+    vertical-align: super;
+    line-height: 1;
+    white-space: nowrap;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+    user-select: none;
+    position: relative;
+}
+
+.citation-ref:hover,
+.citation-ref.active {
+    background: #10a37f;
+    color: #fff;
+    border-color: #10a37f;
+}
+
+/* Table-specific citation rendering: keep citations inline without inflating row height */
+.prose table .citation-ref {
+    vertical-align: baseline;
+    line-height: 1.2;
+    margin: 0 4px;
+}
+
+/* ── Citation Popup Card ────────────────────────────────────────────── */
+.citation-popup {
+    position: fixed;
+    z-index: 99999;
+    width: 380px;
+    max-width: calc(100vw - 24px);
+    background: #1a1a1a;
+    border: 1px solid #2e2e2e;
+    border-radius: 12px;
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.6), 0 4px 16px rgba(0, 0, 0, 0.4);
+    overflow: hidden;
+    font-family: inherit;
+}
+
+/* Down-pointing arrow */
+.citation-popup-arrow {
+    position: absolute;
+    bottom: -7px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 14px;
+    height: 7px;
+    overflow: hidden;
+}
+
+.citation-popup-arrow::before {
+    content: '';
+    position: absolute;
+    top: -7px;
+    left: 50%;
+    transform: translateX(-50%) rotate(45deg);
+    width: 14px;
+    height: 14px;
+    background: #1a1a1a;
+    border: 1px solid #2e2e2e;
+}
+
+/* ── Header ─────────────────────────────────────────────────────────── */
+.citation-popup-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 14px 10px;
+    border-bottom: 1px solid #2e2e2e;
+    background: #222;
+}
+
+.citation-popup-icon {
+    flex-shrink: 0;
+    width: 28px;
+    height: 28px;
+    background: #2e2e2e;
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #10a37f;
+}
+
+.citation-popup-icon svg {
+    width: 16px;
+    height: 16px;
+}
+
+.citation-popup-title {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.citation-popup-filename {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: #e8e8e8;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.citation-popup-page {
+    flex-shrink: 0;
+    font-size: 0.72rem;
+    font-weight: 600;
+    background: rgba(16, 163, 127, 0.2);
+    color: #10a37f;
+    border-radius: 4px;
+    padding: 2px 7px;
+}
+
+.citation-popup-close {
+    flex-shrink: 0;
+    width: 26px;
+    height: 26px;
+    background: transparent;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    color: #666;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.15s, color 0.15s;
+    padding: 0;
+}
+
+.citation-popup-close:hover {
+    background: #333;
+    color: #ccc;
+}
+
+.citation-popup-close svg {
+    width: 14px;
+    height: 14px;
+}
+
+/* ── Body ───────────────────────────────────────────────────────────── */
+.citation-popup-body {
+    padding: 14px;
+    font-size: 0.84rem;
+    line-height: 1.65;
+    color: #c8c8c8;
+    max-height: 260px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    scrollbar-width: thin;
+    scrollbar-color: #3a3a3a transparent;
+}
+
+.citation-popup-body::-webkit-scrollbar {
+    width: 5px;
+}
+
+.citation-popup-body::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.citation-popup-body::-webkit-scrollbar-thumb {
+    background: #3a3a3a;
+    border-radius: 3px;
+}
+
+/* ── Footer ─────────────────────────────────────────────────────────── */
+.citation-popup-footer {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 14px;
+    border-top: 1px solid #2e2e2e;
+    background: #1e1e1e;
+}
+
+.citation-popup-chunk {
+    font-family: 'Fira Code', 'Cascadia Code', monospace;
+    font-size: 0.65rem;
+    color: #555;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 220px;
+}
+
+.citation-popup-num {
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: #10a37f;
+    flex-shrink: 0;
+}
+
+/* ── Prose Styles ───────────────────────────────────────────────────── */
+.prose p {
+    margin-bottom: 1rem;
+    line-height: 1.7;
+}
+
+.prose ul,
+.prose ol {
+    margin-bottom: 1rem;
+    padding-left: 1.5rem;
+}
+
+.prose li {
+    margin-bottom: 0.4rem;
+    line-height: 1.7;
+}
+
+.prose strong {
+    font-weight: 600;
+}
+
+.prose table {
+    width: 100%;
+    max-width: 100%;
+    min-width: 640px;
+    border-collapse: collapse;
+    display: block;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+}
+
+.prose thead,
+.prose tbody {
+    width: 100%;
+}
+
+.prose th,
+.prose td {
+    padding: 10px 12px;
+    border: 1px solid #e5e7eb;
+    text-align: left;
+    vertical-align: top;
+    white-space: normal;
+    word-break: normal;
+}
+
+.prose th {
+    background: #f7f7f8;
+    font-weight: 600;
+}
+
+.prose code {
+    background: rgba(0, 0, 0, 0.07);
+    padding: 0.15rem 0.4rem;
+    border-radius: 4px;
+    font-size: 0.88em;
+    font-family: 'Fira Code', 'Cascadia Code', monospace;
+}
+
+.prose pre {
+    border-radius: 10px;
+    overflow: hidden;
+    margin: 1rem 0;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+}
+
+.prose h1,
+.prose h2,
+.prose h3 {
+    margin-top: 1.5rem;
+    margin-bottom: 0.75rem;
+    font-weight: 600;
+    line-height: 1.3;
+}

@@ -1,0 +1,204 @@
+/* Full Screen App Layout */
+.app-container {
+    display: flex;
+    height: 100vh;
+    width: 100vw;
+    background-color: var(--bg-color);
+    overflow: hidden;
+}
+
+/* Sidebar Styles */
+.app-sidebar {
+    width: 260px;
+    background-color: #f9f9f9;
+    border-right: 1px solid var(--border-light);
+    display: flex;
+    flex-direction: column;
+    flex-shrink: 0;
+    transition: width 0.3s ease;
+}
+
+.sidebar-header {
+    padding: 16px 20px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    border-bottom: 1px solid transparent;
+}
+
+.logo-container {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.logo-container h2 {
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: var(--text-primary);
+    margin: 0;
+}
+
+.badge-small {
+    background: var(--accent-color);
+    color: white;
+    font-size: 0.65rem;
+    padding: 2px 6px;
+    border-radius: 10px;
+    font-weight: 600;
+}
+
+.btn-icon {
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    color: var(--text-secondary);
+    padding: 6px;
+    border-radius: 6px;
+    transition: all 0.2s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.btn-icon:hover {
+    background: rgba(0, 0, 0, 0.05);
+    color: var(--text-primary);
+}
+
+.btn-icon svg {
+    width: 20px;
+    height: 20px;
+}
+
+.sidebar-content {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+}
+
+.sidebar-section {
+    display: flex;
+    flex-direction: column;
+}
+
+.section-title {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 12px;
+    padding-left: 4px;
+}
+
+/* Sidebar Footer */
+.sidebar-footer {
+    padding: 16px;
+    border-top: 1px solid var(--border-light);
+}
+
+.user-profile {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+.user-profile:hover {
+    background: rgba(0, 0, 0, 0.05);
+}
+
+.avatar-placeholder {
+    width: 32px;
+    height: 32px;
+    background: var(--accent-color);
+    color: white;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 600;
+    font-size: 0.9rem;
+}
+
+.username {
+    font-size: 0.9rem;
+    font-weight: 500;
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+
+/* Main Content Area */
+.app-main {
+    flex: 1;
+    position: relative;
+    background: #fff;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+/* Chat Interface Overrides for Full Screen */
+/* We need to ensure ChatInterface takes full height and width of .app-main */
+.app-main .chat-interface {
+    height: 100%;
+    width: 100%;
+    border: none;
+    border-radius: 0;
+    box-shadow: none;
+}
+
+/* Reset inner chat constraints for full width usage if desired, 
+   but keeping the centered max-width 800px logic from ChatInterface.css 
+   is actually desirable for readability. We just ensure the wrapper fills space. */
+
+/* Empty State Full Screen */
+.empty-state-full {
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    color: var(--text-primary);
+}
+
+.empty-content {
+    max-width: 400px;
+}
+
+.app-logo-large h1 {
+    font-size: 2rem;
+    font-weight: 700;
+    margin-bottom: 16px;
+    background: linear-gradient(135deg, #6366f1 0%, #a855f7 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+}
+
+/* Spinner Small */
+.spinner-small {
+    width: 20px;
+    height: 20px;
+    border: 2px solid rgba(0, 0, 0, 0.1);
+    border-top-color: var(--accent-color);
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+}
+
+@media (max-width: 768px) {
+    .app-sidebar {
+        width: 0;
+        overflow: hidden;
+        /* A mobile menu toggle would be needed here in a real full implementation */
+    }
+}

@@ -1,0 +1,54 @@
+{
+  "evaluation_dataset": [
+    {
+      "question": "What are the three core pipelines in the FTI (Feature/Training/Inference) architecture and what does each one do?",
+      "ground_truth": "The three pipelines are Feature Pipeline (processes raw data into features and stores them in a feature store), Training Pipeline (trains models using features and labels from the feature store and stores models in a model registry), and Inference Pipeline (makes predictions using features from the feature store and trained models from the model registry).",
+      "difficulty": "medium"
+    },
+    {
+      "question": "What is an LLM Twin and what is its primary use case in this book?",
+      "ground_truth": "An LLM Twin is a personalized AI that learns to write like a specific person by fine-tuning on their digital content. The primary use case is to write personalized content on social media platforms like LinkedIn, X, Instagram, and blogs using the person's unique style and voice, acting as a writing co-pilot.",
+      "difficulty": "easy"
+    },
+    {
+      "question": "According to the book, what are the main benefits of using the FTI pipeline architecture over a monolithic batch architecture?",
+      "ground_truth": "FTI architecture provides modularity, independent scaling of components, reusable features across teams, ability to use different tech stacks per component, independent team development with clear interfaces, flexibility to rewrite components in different languages, support for streaming technology, and prevention of training-serving skew through feature versioning.",
+      "difficulty": "hard"
+    },
+    {
+      "question": "What are the four main components of the LLM Twin system architecture?",
+      "ground_truth": "The four components are: 1) Data Collection Pipeline (crawls personal data from Medium, Substack, LinkedIn, and GitHub), 2) Feature Pipeline (processes raw data through cleaning, chunking, and embedding), 3) Training Pipeline (fine-tunes LLMs using instruction datasets), and 4) Inference Pipeline (uses fine-tuned model and vector database for RAG to generate responses).",
+      "difficulty": "medium"
+    },
+    {
+      "question": "What is ZenML and what are its three main features used in the LLM Twin project?",
+      "ground_truth": "ZenML is a framework that bridges ML and MLOps. Its three main features are: 1) Orchestrating ML pipelines (managing execution order and dependencies), 2) Storing and versioning artifacts (automatically converting step outputs into versioned, shareable artifacts), and 3) Attaching metadata (allowing custom metadata for better observability and discovery).",
+      "difficulty": "medium"
+    },
+    {
+      "question": "What are embeddings and why are they powerful in the context of RAG systems?",
+      "ground_truth": "Embeddings are numerical vector representations of text that capture semantic meaning in a continuous vector space. They are powerful because they enable semantic similarity search (similar concepts have similar vectors), dimensionality reduction, mathematical operations on text, and efficient retrieval in vector databases, allowing RAG systems to find contextually relevant information even without exact keyword matches.",
+      "difficulty": "hard"
+    },
+    {
+      "question": "What data sources does the LLM Twin collect from, and into what three categories is this data organized?",
+      "ground_truth": "The LLM Twin collects from Medium, Substack, LinkedIn, and GitHub. The data is organized into three categories: 1) Articles (from Medium and Substack), 2) Posts (from LinkedIn), and 3) Code (from GitHub). This categorization is by type rather than source to enable different processing strategies and easy integration of new platforms.",
+      "difficulty": "easy"
+    },
+    {
+      "question": "According to the book, what are the key differences between using ChatGPT directly versus building an LLM Twin system?",
+      "ground_truth": "Key differences include: LLM Twin provides personalization through fine-tuning on personal data (vs. generic ChatGPT), better hallucination control through custom evaluation, automated prompt engineering (vs. manual prompting), systematic data management and preprocessing, reproducible results through automated systems, and maintains original voice for brand building (vs. generic content).",
+      "difficulty": "hard"
+    },
+    {
+      "question": "What is the vanilla RAG framework and what are its three main pipelines?",
+      "ground_truth": "Vanilla RAG is the basic Retrieval-Augmented Generation approach with three pipelines: 1) Ingestion Pipeline (chunks documents and creates embeddings stored in a vector database), 2) Retrieval Pipeline (converts user query to embedding, performs similarity search, returns top-k documents), and 3) Generation Pipeline (combines retrieved context with query and sends to LLM for answer generation).",
+      "difficulty": "medium"
+    },
+    {
+      "question": "What MLOps tools are used in the LLM Twin project and what is the primary purpose of each?",
+      "ground_truth": "The project uses: Hugging Face (model registry for storing and sharing fine-tuned models), ZenML (orchestrator for ML pipelines and artifact management), Comet ML (experiment tracking for metrics and hyperparameters), Opik (prompt monitoring for logging and debugging prompt chains), MongoDB (NoSQL database for raw unstructured data), and Qdrant (vector database for embeddings and similarity search).",
+      "difficulty": "easy"
+    }
+  ]
+}

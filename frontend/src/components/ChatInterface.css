@@ -1,0 +1,480 @@
+/* Modern ChatGPT-like Chat Interface */
+:root {
+    --bg-color: #ffffff;
+    --bg-chat-bubble-user: #f4f4f4;
+    --bg-chat-bubble-ai: transparent;
+    --text-primary: #0d0d0d;
+    --text-secondary: #666666;
+    --border-light: #ececec;
+    --accent-color: #10a37f;
+    /* ChatGPT Green-ish */
+    --hover-color: #f0f0f0;
+    --font-family: 'Söhne', 'ui-sans-serif', 'system-ui', -apple-system, 'Segoe UI', Roboto, Ubuntu, Cantarell, 'Noto Sans', sans-serif, 'Helvetica Neue', Arial;
+    --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+}
+
+.chat-interface {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    background-color: var(--bg-color);
+    font-family: var(--font-family);
+    color: var(--text-primary);
+    position: relative;
+    /* overflow: hidden removed — needed for tooltip popups to escape */
+}
+
+/* Header */
+.chat-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 20px;
+    border-bottom: 1px solid var(--border-light);
+    background: rgba(255, 255, 255, 0.9);
+    backdrop-filter: blur(10px);
+    z-index: 10;
+    position: sticky;
+    top: 0;
+}
+
+.chat-header h3 {
+    margin: 0;
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+/* Message Area */
+.chat-messages-container {
+    flex: 1;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    scroll-behavior: smooth;
+    padding-bottom: 20px;
+    /* Space for input area buffer */
+}
+
+.chat-messages {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    max-width: 800px;
+    margin: 0 auto;
+    padding: 24px;
+    box-sizing: border-box;
+}
+
+/* Empty State */
+.chat-empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    min-height: 400px;
+    text-align: center;
+    color: var(--text-primary);
+    margin-top: 10vh;
+}
+
+.chat-empty-icon {
+    width: 48px;
+    height: 48px;
+    background: #fff;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin-bottom: 16px;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
+    color: var(--text-primary);
+}
+
+.chat-empty-icon svg {
+    width: 24px;
+    height: 24px;
+}
+
+.chat-empty h2 {
+    font-size: 1.5rem;
+    font-weight: 600;
+    margin-bottom: 8px;
+}
+
+.chat-empty p {
+    color: var(--text-secondary);
+    font-size: 0.95rem;
+}
+
+/* Message Rows */
+.message-row {
+    display: flex;
+    padding: 2px 0;
+    margin-bottom: 0px;
+    width: 100%;
+}
+
+.message-content-wrapper {
+    display: flex;
+    gap: 16px;
+    width: 100%;
+}
+
+/* Avatars */
+.message-avatar {
+    flex-shrink: 0;
+    width: 30px;
+    height: 30px;
+    margin-top: 2px;
+}
+
+.avatar-ai,
+.avatar-user {
+    width: 30px;
+    height: 30px;
+    border-radius: 2px;
+    /* Slight roundness like ChatGPT icons */
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.avatar-ai {
+    background-color: var(--accent-color);
+    color: white;
+    border-radius: 50%;
+}
+
+.avatar-user {
+    background-color: #ccc;
+    color: #fff;
+    border-radius: 50%;
+    overflow: hidden;
+    font-size: 0.7rem;
+}
+
+.avatar-ai svg {
+    width: 18px;
+    height: 18px;
+}
+
+/* Message Bubbles */
+.message-bubble {
+    flex: 1;
+    min-width: 0;
+    font-size: 1rem;
+    line-height: 1.6;
+    color: var(--text-primary);
+}
+
+/* User Message Styling */
+.message-row.user .message-content-wrapper {
+    flex-direction: row-reverse;
+}
+
+/* Note: In modern ChatGPT, user messages are distinct bubbles. */
+.message-row.user .message-bubble {
+    background-color: var(--bg-chat-bubble-user);
+    padding: 10px 16px;
+    border-radius: 20px;
+    max-width: 80%;
+    flex: unset;
+    /* Let it shrink to fit content */
+    margin-left: auto;
+    /* Push to right if not row-reverse, but we used row-reverse above */
+}
+
+/* AI Message Styling */
+/* AI messages take full width available (up to max container) */
+.message-row.ai .message-bubble {
+    padding: 0 0 16px 0;
+    background: transparent;
+}
+
+
+/* Markdown Content */
+.markdown-content {
+    overflow-wrap: break-word;
+}
+
+.markdown-content p {
+    margin: 0 0 16px 0;
+}
+
+.markdown-content p:last-child {
+    margin-bottom: 0;
+}
+
+.markdown-content pre {
+    background: #f7f7f8;
+    border-radius: 6px;
+    padding: 12px;
+    overflow-x: auto;
+    margin: 12px 0;
+    border: 1px solid var(--border-light);
+}
+
+/* Actions */
+.message-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 8px;
+    opacity: 0;
+    transition: opacity 0.2s;
+}
+
+.message-row:hover .message-actions {
+    opacity: 1;
+}
+
+.action-btn {
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    color: var(--text-secondary);
+    padding: 4px;
+    border-radius: 4px;
+    transition: background 0.2s, color 0.2s;
+}
+
+.action-btn:hover {
+    background: var(--hover-color);
+    color: var(--text-primary);
+}
+
+/* Citations */
+.citations-container {
+    margin-top: 12px;
+}
+
+.citations-header {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    margin-bottom: 8px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.citations-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.citation-item {
+    display: inline-flex;
+    align-items: center;
+    background: #fff;
+    border: 1px solid #ddd;
+    border-radius: 16px;
+    padding: 4px 10px;
+    font-size: 0.8rem;
+    cursor: pointer;
+    transition: all 0.2s;
+    color: var(--text-secondary);
+}
+
+.citation-item:hover {
+    border-color: var(--accent-color);
+    color: var(--accent-color);
+    background: #f0fdf4;
+}
+
+.citation-number {
+    font-weight: bold;
+    margin-right: 6px;
+}
+
+/* Highlight Pulse for Citations */
+@keyframes pulse-highlight {
+    0% {
+        background-color: rgba(16, 163, 127, 0.2);
+    }
+
+    100% {
+        background-color: transparent;
+    }
+}
+
+.highlight-pulse {
+    animation: pulse-highlight 2s ease-out;
+    border-radius: 4px;
+}
+
+/* Typing Indicator */
+.typing-indicator {
+    display: flex;
+    flex-direction: row;
+    white-space: nowrap;
+    gap: 8px;
+    align-items: center;
+    padding: 8px 14px;
+    background: var(--bg-secondary);
+    border-radius: 12px;
+    width: fit-content;
+}
+
+.thinking-text {
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+    font-style: italic;
+    flex-shrink: 0;
+}
+
+.typing-indicator span {
+    width: 5px;
+    height: 5px;
+    background: var(--primary-color);
+    border-radius: 50%;
+    opacity: 0.4;
+    animation: wave 1.2s infinite ease-in-out;
+}
+
+.typing-indicator span:nth-child(1) {
+    animation-delay: 0s;
+}
+
+.typing-indicator span:nth-child(2) {
+    animation-delay: 0.2s;
+}
+
+.typing-indicator span:nth-child(3) {
+    animation-delay: 0.4s;
+}
+
+@keyframes wave {
+
+    0%,
+    60%,
+    100% {
+        transform: translateY(0);
+        opacity: 0.4;
+    }
+
+    30% {
+        transform: translateY(-4px);
+        opacity: 1;
+    }
+}
+
+/* Response Text Bubbles */
+.message-bubble {
+    padding: 12px 16px;
+    border-radius: 18px;
+    line-height: 1.55;
+    word-break: break-word;
+    position: relative;
+    max-width: 100%;
+    font-size: 0.95rem;
+}
+
+/* Input Area */
+.chat-input-container {
+    width: 100%;
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0) 0%, rgba(255, 255, 255, 1) 20%);
+    padding-bottom: 24px;
+    padding-top: 10px;
+    position: relative;
+    z-index: 20;
+}
+
+.chat-input-wrapper {
+    max-width: 800px;
+    margin: 0 auto;
+    padding: 0 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.chat-input-form {
+    position: relative;
+    display: flex;
+    align-items: center;
+    background: #fff;
+    border: 1px solid #ccc;
+    border-radius: 16px;
+    /* Pill/Rounded Rectangle shape */
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.05);
+    transition: border-color 0.2s, box-shadow 0.2s;
+    padding: 6px;
+}
+
+.chat-input-form:focus-within {
+    border-color: #888;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+}
+
+.chat-input {
+    flex: 1;
+    border: none;
+    outline: none;
+    padding: 12px 16px;
+    /* Comfortable padding */
+    font-size: 1rem;
+    background: transparent;
+    font-family: inherit;
+    resize: none;
+    /* If using textarea later */
+}
+
+.send-btn {
+    background: var(--accent-color);
+    color: white;
+    border: none;
+    border-radius: 10px;
+    width: 36px;
+    height: 36px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: opacity 0.2s, background 0.2s;
+    margin-right: 4px;
+}
+
+.send-btn:disabled {
+    background: #e5e5e5;
+    color: #aaa;
+    cursor: default;
+}
+
+.send-btn svg {
+    width: 18px;
+    height: 18px;
+}
+
+.send-btn:not(:disabled):hover {
+    opacity: 0.9;
+}
+
+.chat-footer-text {
+    text-align: center;
+    color: #999;
+    font-size: 0.75rem;
+    margin-top: 4px;
+}
+
+/* Mobile Responsiveness */
+@media (max-width: 768px) {
+    .chat-messages {
+        padding: 16px;
+    }
+
+    .chat-input-wrapper {
+        padding: 0 16px;
+    }
+
+    .message-row.user .message-bubble {
+        max-width: 90%;
+    }
+}
