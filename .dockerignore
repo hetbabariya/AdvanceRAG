@@ -1,0 +1,27 @@
+# VCS
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.pytest_cache
+.venv
+venv
+
+# Node
+frontend/node_modules
+frontend/dist
+
+# Local env
+.env
+.env.*
+
+# Notebooks (often contain large outputs)
+*.ipynb
+
+# OS
+.DS_Store
+Thumbs.db

@@ -45,7 +45,7 @@ def upload_bytes(*, path: str, content: bytes, content_type: str) -> None:
     resp = sb.storage.from_(bucket).upload(
         path=path,
         file=content,
-        file_options={"content-type": content_type, "upsert": True},
+        file_options={"content-type": str(content_type), "upsert": "true"},
     )
 
     if isinstance(resp, dict) and resp.get("error"):
