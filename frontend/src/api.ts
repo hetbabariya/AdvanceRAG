@@ -10,6 +10,15 @@ export const api = axios.create({
     },
 });
 
+// Interceptor to add Authorization header from localStorage if cookie fails
+api.interceptors.request.use((config) => {
+    const token = localStorage.getItem('session_token');
+    if (token) {
+        config.headers.Authorization = `Bearer ${token}`;
+    }
+    return config;
+});
+
 // Types
 export interface User {
     id: number;
@@ -57,11 +66,15 @@ export const authAPI = {
 
     login: async (username: string, password: string) => {
         const response = await api.post('/login', { username, password });
+        if (response.data.session_token) {
+            localStorage.setItem('session_token', response.data.session_token);
+        }
         return response.data;
     },
 
     logout: async () => {
         const response = await api.post('/logout');
+        localStorage.removeItem('session_token');
         return response.data;
     },
 

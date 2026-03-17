@@ -166,6 +166,7 @@ async def login(
     logger.info("User '%s' logged in successfully", user.username)
     return {
         "message": "Login successful",
+        "session_token": session_token,
         "user": UserResponse(
             id=user.id,
             username=user.username,

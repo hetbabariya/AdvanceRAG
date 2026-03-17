@@ -209,16 +209,21 @@ async def get_user_from_session(
 
 async def get_current_user(
     session_token: Optional[str] = Cookie(None, alias="session_token"),
+    auth_header: Optional[str] = Header(None, alias="Authorization"),
     db: AsyncSession = Depends(get_db)
 ) -> User:
-    """FastAPI dependency to get the current authenticated user"""
-    if not session_token:
+    """FastAPI dependency to get the current authenticated user (Cookie or Header)"""
+    token = session_token
+    if not token and auth_header and auth_header.startswith("Bearer "):
+        token = auth_header.replace("Bearer ", "")
+
+    if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Not authenticated"
         )
 
-    return await get_user_from_session(session_token, db)
+    return await get_user_from_session(token, db)
 
 
 async def delete_session(db: AsyncSession, session_token: str):
