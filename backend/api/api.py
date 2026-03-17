@@ -148,9 +148,12 @@ async def login(
     await db.commit()
 
     is_production = os.getenv("ENVIRONMENT", "development").lower() == "production"
-    cookie_samesite = (os.getenv("COOKIE_SAMESITE") or ("none" if is_production else "lax")).lower()
-    cookie_secure = (os.getenv("COOKIE_SECURE") or ("1" if (is_production and cookie_samesite == "none") else "0"))
+    # For cross-domain cookies (Vercel -> EC2), we MUST use SameSite=None and Secure=True
+    # even if not in "production" mode, as long as the domains are different.
+    cookie_samesite = (os.getenv("COOKIE_SAMESITE") or "none").lower()
+    cookie_secure = os.getenv("COOKIE_SECURE") or "1"
     use_secure_cookie = cookie_secure in {"1", "true", "yes", "on"}
+
     response.set_cookie(
         key="session_token",
         value=session_token,
