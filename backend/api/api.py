@@ -1,4 +1,5 @@
 import asyncio
+import re
 import json
 import os
 from pathlib import Path
@@ -7,7 +8,7 @@ from typing import Optional
 from fastapi import BackgroundTasks, Body, Cookie, Depends, File, HTTPException, Request, Response, UploadFile, status
 from slowapi import Limiter
 from slowapi.util import get_remote_address
-from sqlalchemy import desc, select
+from sqlalchemy import delete, desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.api.auth import authenticate_user, create_session, create_user, delete_session, get_current_user
@@ -35,13 +36,12 @@ from backend.api.utils import (
     parse_citations,
     safe_upload_path
 )
-from backend.rag.pinecone_hybrid import bm25_path, build_hybrid_index
+from backend.rag.agent_graph import AgenticRagGraph
+from backend.rag.pinecone_hybrid import bm25_path
 from backend.rag.service import RagService
-from backend.rag.settings import load_settings
-from backend.api.supabase_storage import download_to_file, upload_bytes, upload_file
+from backend.api.supabase_storage import delete_remote, download_to_file, upload_bytes, upload_file
 
 logger = get_logger(__name__)
-
 
 try:
     from langsmith import traceable  # type: ignore
@@ -54,19 +54,50 @@ except Exception:  # pragma: no cover
 
 limiter = Limiter(key_func=get_remote_address)
 
-settings = load_settings()
-hybrid = build_hybrid_index(
-    pinecone_api_key=settings.pinecone_api_key,
-    index_name=settings.pinecone_index_name,
-    embedding_model=settings.embedding_model,
-    cloud=settings.pinecone_cloud,
-    region=settings.pinecone_region,
-)
-service = RagService.create(settings, hybrid)
+def get_rag_service(request: Request) -> RagService:
+    service = getattr(request.app.state, "rag_service", None)
+    if service is None:
+        raise HTTPException(status_code=503, detail="RAG service not initialized")
+    return service
+
+def _is_smalltalk_message(text: str) -> bool:
+    t = (text or "").strip().lower()
+    if not t:
+        return True
+    if len(t) <= 8 and re.fullmatch(r"(hi|hello|hey|yo|sup|hii+|heyy+)", t):
+        return True
+    if len(t) <= 24 and re.fullmatch(r"(good\s+morning|good\s+afternoon|good\s+evening)", t):
+        return True
+    if len(t) <= 32 and re.fullmatch(r"(how\s+are\s+you|what'?s\s+up)", t):
+        return True
+    return False
 
 from fastapi import APIRouter  # noqa: E402
 
 router = APIRouter()
+
+
+def _int_env(name: str, default: int) -> int:
+    raw = (os.getenv(name, "") or "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except Exception:
+        return default
+
+
+def _effective_k(*, requested: Optional[int], default_env: str, default_value: int, max_env: str, max_value: int) -> int:
+    default_k = _int_env(default_env, default_value)
+    max_k = _int_env(max_env, max_value)
+    if max_k < 1:
+        max_k = max_value
+    k = requested if requested is not None else default_k
+    if k < 1:
+        k = 1
+    if k > max_k:
+        k = max_k
+    return k
 
 
 def _dump_model(obj: object) -> dict:
@@ -196,6 +227,7 @@ async def _process_file_ingestion(
     original_name: str,
     file_hash: str,
     file_size: int,
+    service: RagService,
 ) -> tuple[int, bool]:
     cached_file = await cache_manager.get_file_by_hash(file_hash)
     if cached_file:
@@ -236,6 +268,7 @@ async def ingest(
     file: UploadFile = File(...),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    service: RagService = Depends(get_rag_service),
 ):
     if not file.filename:
         raise HTTPException(status_code=400, detail="Missing filename")
@@ -244,7 +277,7 @@ async def ingest(
     if suffix not in {".pdf", ".docx", ".txt", ".md"}:
         raise HTTPException(status_code=400, detail=f"Unsupported file type: {suffix}")
 
-    ensure_directory(settings.upload_dir)
+    ensure_directory(service.settings.upload_dir)
 
     try:
         content = await file.read()
@@ -271,7 +304,7 @@ async def ingest(
             cached=True,
         )
 
-    saved_path = safe_upload_path(settings.upload_dir, current_user.id, file_hash, suffix)
+    saved_path = safe_upload_path(service.settings.upload_dir, current_user.id, file_hash, suffix)
     try:
         with open(saved_path, "wb") as f:
             f.write(content)
@@ -285,9 +318,9 @@ async def ingest(
             content_type=file.content_type or "application/octet-stream",
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to upload file to Supabase Storage: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to upload file to S3 Storage: {e}")
 
-    count, cached = await _process_file_ingestion(saved_path, file.filename, file_hash, file_size)
+    count, cached = await _process_file_ingestion(saved_path, file.filename, file_hash, file_size, service)
 
     try:
         bm25_local_path = bm25_path(service.settings.bm25_store_dir, file.filename)
@@ -297,7 +330,7 @@ async def ingest(
             content_type="application/octet-stream",
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to upload BM25 artifact to Supabase Storage: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to upload BM25 artifact to S3 Storage: {e}")
 
     file_metadata = FileMetadata(
         user_id=current_user.id,
@@ -330,6 +363,7 @@ async def ingest_youtube(
     req: URLIngestRequest,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    service: RagService = Depends(get_rag_service),
 ):
     import hashlib
     from urllib.parse import urlparse
@@ -413,6 +447,20 @@ async def delete_file(
     if not file_metadata:
         raise HTTPException(status_code=404, detail="File not found")
 
+    # Best-effort cleanup of remote artifacts (S3)
+    try:
+        suffix = Path(file_metadata.file_name).suffix.lower()
+        delete_remote(remote_path=f"uploads/{current_user.id}/{file_metadata.file_hash}{suffix}")
+        delete_remote(remote_path=f"bm25/{file_metadata.file_hash}.pkl")
+    except Exception:
+        pass
+
+    await db.execute(
+        delete(ChatHistory).where(
+            ChatHistory.user_id == current_user.id,
+            ChatHistory.file_name == file_name,
+        )
+    )
     await db.delete(file_metadata)
     await cache_manager.invalidate_file_cache(file_metadata.file_hash, file_metadata.file_name)
     await db.commit()
@@ -428,6 +476,8 @@ async def _resolve_retrieval(
     req: ChatRequest,
     current_user: User,
     db: AsyncSession,
+    service: RagService,
+    retrieval_top_k: int,
 ) -> tuple[list, str]:
     if not req.file_name:
         raise HTTPException(
@@ -462,7 +512,7 @@ async def _resolve_retrieval(
             service.retrieve,
             query=rewritten_query,
             file_name=req.file_name,
-            top_k=req.top_k,
+            top_k=retrieval_top_k,
         )
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -479,7 +529,28 @@ async def chat(
     req: ChatRequest,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    service: RagService = Depends(get_rag_service),
 ) -> ChatResponse:
+    retrieval_top_k = _effective_k(
+        requested=None,
+        default_env="RETRIEVAL_TOP_K_DEFAULT",
+        default_value=10,
+        max_env="RETRIEVAL_TOP_K_MAX",
+        max_value=50,
+    )
+    rerank_top_k = _effective_k(
+        requested=None,
+        default_env="RERANK_TOP_K_DEFAULT",
+        default_value=retrieval_top_k,
+        max_env="RERANK_TOP_K_MAX",
+        max_value=retrieval_top_k,
+    )
+    logger.debug(
+        "Effective k values (env-only): retrieval_top_k=%s rerank_top_k=%s file=%s",
+        retrieval_top_k,
+        rerank_top_k,
+        req.file_name,
+    )
     cached_result = await cache_manager.get_query_result(req.message, req.file_name)
     if cached_result:
         chat_history = ChatHistory(
@@ -498,12 +569,12 @@ async def chat(
             cached=True,
         )
 
-    matches, rewritten_query = await _resolve_retrieval(req, current_user, db)
+    matches, rewritten_query = await _resolve_retrieval(req, current_user, db, service, retrieval_top_k)
     docs = service._matches_to_documents(matches)
 
     if req.use_reranker and docs:
         docs = await asyncio.to_thread(
-            service.rerank, query=rewritten_query, docs=docs, top_k=min(len(docs), req.top_k)
+            service.rerank, query=rewritten_query, docs=docs, top_k=min(len(docs), rerank_top_k)
         )
 
     try:
@@ -539,14 +610,375 @@ async def chat(
     )
 
 
+@router.post("/chat/agent", response_model=ChatResponse)
+@traceable(name="pipeline.chat_agent")
+async def chat_agent(
+    req: ChatRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    service: RagService = Depends(get_rag_service),
+) -> ChatResponse:
+    if _is_smalltalk_message(req.message):
+        prompt = (
+            "You are a helpful assistant. The user is greeting you. "
+            "Reply briefly and friendly. Ask one short question to understand what they want to do with the selected document.\n\n"
+            f"User: {req.message}\n"
+            "Assistant:"
+        )
+        try:
+            resp = await asyncio.to_thread(service.llm.invoke, prompt)
+            answer_text = (getattr(resp, "content", "") or str(resp)).strip()
+        except Exception as e:
+            logger.exception("Smalltalk generation failed")
+            raise HTTPException(status_code=500, detail=f"Generation failed: {e}")
+
+        result_data = {
+            "answer": answer_text,
+            "citations": [],
+            "used_context_chunks": 0,
+        }
+        cache_message = f"[agent]{req.message}"
+        await cache_manager.set_query_result(cache_message, req.file_name, result_data)
+
+        chat_history = ChatHistory(
+            user_id=current_user.id,
+            file_name=req.file_name,
+            question=req.message,
+            answer=answer_text,
+            citations=[],
+        )
+        db.add(chat_history)
+        await db.commit()
+
+        return ChatResponse(
+            answer=answer_text,
+            citations=[],
+            used_context_chunks=0,
+            cached=False,
+        )
+
+    retrieval_top_k = _effective_k(
+        requested=None,
+        default_env="RETRIEVAL_TOP_K_DEFAULT",
+        default_value=10,
+        max_env="RETRIEVAL_TOP_K_MAX",
+        max_value=50,
+    )
+    rerank_top_k = _effective_k(
+        requested=None,
+        default_env="RERANK_TOP_K_DEFAULT",
+        default_value=retrieval_top_k,
+        max_env="RERANK_TOP_K_MAX",
+        max_value=retrieval_top_k,
+    )
+
+    cache_message = f"[agent]{req.message}"
+    cached_result = await cache_manager.get_query_result(cache_message, req.file_name)
+    if cached_result:
+        chat_history = ChatHistory(
+            user_id=current_user.id,
+            file_name=req.file_name,
+            question=req.message,
+            answer=cached_result["answer"],
+            citations=cached_result["citations"],
+        )
+        db.add(chat_history)
+        await db.commit()
+        return ChatResponse(
+            answer=cached_result["answer"],
+            citations=cached_result["citations"],
+            used_context_chunks=cached_result["used_context_chunks"],
+            cached=True,
+        )
+
+    try:
+        matches, _rewritten_for_bm25 = await _resolve_retrieval(req, current_user, db, service, retrieval_top_k)
+        _ = matches
+    except Exception:
+        # _resolve_retrieval already raises proper HTTPException
+        raise
+
+    agent = AgenticRagGraph(
+        service=service,
+        retrieval_top_k=retrieval_top_k,
+        rerank_top_k=rerank_top_k,
+    )
+    agent_state = await asyncio.to_thread(agent.run, question=req.message, file_name=req.file_name)
+    docs = list(agent_state.get("docs", []) or [])
+    try:
+        raw_answer = await asyncio.to_thread(service.generate, question=req.message, context_docs=docs)
+    except Exception as e:
+        logger.exception("Generation failed")
+        raise HTTPException(status_code=500, detail=f"Generation failed: {e}")
+
+    answer_text, citations = parse_citations(raw_answer, docs, fetch_missing_fn=service.fetch_chunks_by_ids)
+
+    result_data = {
+        "answer": answer_text,
+        "citations": [_dump_model(c) for c in citations],
+        "used_context_chunks": len(docs),
+    }
+    await cache_manager.set_query_result(cache_message, req.file_name, result_data)
+
+    chat_history = ChatHistory(
+        user_id=current_user.id,
+        file_name=req.file_name,
+        question=req.message,
+        answer=answer_text,
+        citations=[_dump_model(c) for c in citations],
+    )
+    db.add(chat_history)
+    await db.commit()
+
+    return ChatResponse(
+        answer=answer_text,
+        citations=citations,
+        used_context_chunks=len(docs),
+        cached=False,
+    )
+
+
+@router.get("/chat/agent/stream")
+async def chat_agent_stream(
+    message: str,
+    file_name: str,
+    use_reranker: bool = True,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    service: RagService = Depends(get_rag_service),
+):
+    from fastapi.responses import StreamingResponse as FastAPIStreamingResponse
+
+    async def _pipeline_event_stream():
+        agent_task: Optional[asyncio.Task] = None
+        try:
+            if _is_smalltalk_message(message):
+                prompt = (
+                    "You are a helpful assistant. The user is greeting you. "
+                    "Reply briefly and friendly. Ask one short question to understand what they want to do with the selected document.\n\n"
+                    f"User: {message}\n"
+                    "Assistant:"
+                )
+
+                full_text = ""
+                try:
+                    async for chunk in service.llm.astream(prompt):
+                        token = getattr(chunk, "content", "") or str(chunk)
+                        if token:
+                            full_text += token
+                            yield f"data: {json.dumps({'type': 'token', 'text': token})}\n\n"
+                except Exception as e:
+                    logger.exception("Smalltalk streaming failed")
+                    yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+                    return
+
+                answer_text = full_text.strip()
+                result_data = {
+                    "answer": answer_text,
+                    "citations": [],
+                    "used_context_chunks": 0,
+                }
+                cache_message = f"[agent]{message}"
+                await cache_manager.set_query_result(cache_message, file_name, result_data)
+
+                chat_history = ChatHistory(
+                    user_id=current_user.id,
+                    file_name=file_name,
+                    question=message,
+                    answer=answer_text,
+                    citations=[],
+                )
+                db.add(chat_history)
+                await db.commit()
+
+                yield (
+                    "data: "
+                    + json.dumps(
+                        {
+                            "type": "done",
+                            "answer": answer_text,
+                            "citations": [],
+                            "used_context_chunks": 0,
+                            "cached": False,
+                        }
+                    )
+                    + "\n\n"
+                )
+                return
+
+            agent_event_queue: asyncio.Queue = asyncio.Queue()
+            req = ChatRequest(
+                message=message,
+                file_name=file_name,
+                use_reranker=use_reranker,
+            )
+
+            retrieval_top_k = _effective_k(
+                requested=None,
+                default_env="RETRIEVAL_TOP_K_DEFAULT",
+                default_value=10,
+                max_env="RETRIEVAL_TOP_K_MAX",
+                max_value=50,
+            )
+            rerank_top_k = _effective_k(
+                requested=None,
+                default_env="RERANK_TOP_K_DEFAULT",
+                default_value=retrieval_top_k,
+                max_env="RERANK_TOP_K_MAX",
+                max_value=retrieval_top_k,
+            )
+
+            cache_message = f"[agent]{message}"
+            cached_result = await cache_manager.get_query_result(cache_message, file_name)
+            if cached_result:
+                answer = cached_result["answer"]
+                chunk_size = 8
+                for i in range(0, len(answer), chunk_size):
+                    token = answer[i : i + chunk_size]
+                    yield f"data: {json.dumps({'type': 'token', 'text': token})}\n\n"
+                    await asyncio.sleep(0.01)
+                yield (
+                    "data: "
+                    + json.dumps(
+                        {
+                            "type": "done",
+                            "answer": cached_result["answer"],
+                            "citations": cached_result["citations"],
+                            "used_context_chunks": cached_result["used_context_chunks"],
+                            "cached": True,
+                        }
+                    )
+                    + "\n\n"
+                )
+                return
+
+            await _resolve_retrieval(req, current_user, db, service, retrieval_top_k)
+
+            loop = asyncio.get_running_loop()
+
+            def _on_agent_event(payload: dict) -> None:
+                loop.call_soon_threadsafe(agent_event_queue.put_nowait, payload)
+
+            agent = AgenticRagGraph(
+                service=service,
+                retrieval_top_k=retrieval_top_k,
+                rerank_top_k=rerank_top_k,
+                on_event=_on_agent_event,
+            )
+
+            agent_task = asyncio.create_task(
+                asyncio.to_thread(agent.run, question=message, file_name=file_name)
+            )
+
+            while True:
+                if agent_task.done() and agent_event_queue.empty():
+                    break
+                try:
+                    evt = await asyncio.wait_for(agent_event_queue.get(), timeout=0.25)
+                    yield f"data: {json.dumps({'type': 'agent', **evt})}\n\n"
+                except asyncio.TimeoutError:
+                    continue
+
+            try:
+                agent_state = await agent_task
+            except Exception as e:
+                msg = str(e)
+                if "BM25 model not found" in msg and "Ingest the file first" in msg:
+                    msg = "This file is not ingested yet (BM25 index missing). Please upload/ingest the file first, then try again."
+                logger.exception("Agent run failed")
+                yield f"data: {json.dumps({'type': 'error', 'message': msg})}\n\n"
+                return
+
+            docs = list(agent_state.get("docs", []) or [])
+            if not docs:
+                yield (
+                    "data: "
+                    + json.dumps(
+                        {
+                            "type": "error",
+                            "message": "Agent could not retrieve any context chunks, so citations cannot be produced. Please verify the correct file is selected and ingested, then try again.",
+                        }
+                    )
+                    + "\n\n"
+                )
+                return
+
+            full_text = ""
+            try:
+                async for chunk in service.generate_stream(question=message, context_docs=docs):
+                    if isinstance(chunk, dict) and chunk.get("__done__"):
+                        full_text = chunk["full_text"]
+                        break
+                    full_text += chunk
+                    yield f"data: {json.dumps({'type': 'token', 'text': chunk})}\n\n"
+            except Exception as e:
+                logger.exception("Streaming generation failed")
+                yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+                return
+
+            answer_text, citations = parse_citations(
+                full_text, docs, fetch_missing_fn=service.fetch_chunks_by_ids
+            )
+            result_data = {
+                "answer": answer_text,
+                "citations": [_dump_model(c) for c in citations],
+                "used_context_chunks": len(docs),
+            }
+            await cache_manager.set_query_result(cache_message, file_name, result_data)
+
+            chat_history = ChatHistory(
+                user_id=current_user.id,
+                file_name=file_name,
+                question=message,
+                answer=answer_text,
+                citations=[_dump_model(c) for c in citations],
+            )
+            db.add(chat_history)
+            await db.commit()
+
+            yield (
+                "data: "
+                + json.dumps(
+                    {
+                        "type": "done",
+                        "answer": answer_text,
+                        "citations": [_dump_model(c) for c in citations],
+                        "used_context_chunks": len(docs),
+                        "cached": False,
+                    }
+                )
+                + "\n\n"
+            )
+        finally:
+            try:
+                if agent_task is not None and not agent_task.done():
+                    agent_task.cancel()
+            except Exception:
+                pass
+            try:
+                await db.close()
+            except Exception:
+                pass
+
+    _pipeline_event_stream = traceable(name="pipeline.chat_agent_stream")(_pipeline_event_stream)
+
+    return FastAPIStreamingResponse(
+        _pipeline_event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @router.get("/chat/stream")
 async def chat_stream(
     message: str,
     file_name: str,
-    top_k: int = 10,
+    top_k: Optional[int] = None,
     use_reranker: bool = True,
+    rerank_top_k: Optional[int] = None,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    service: RagService = Depends(get_rag_service),
 ):
     from fastapi.responses import StreamingResponse as FastAPIStreamingResponse
 
@@ -556,6 +988,28 @@ async def chat_stream(
             file_name=file_name,
             top_k=top_k,
             use_reranker=use_reranker,
+            rerank_top_k=rerank_top_k,
+        )
+
+        retrieval_top_k = _effective_k(
+            requested=None,
+            default_env="RETRIEVAL_TOP_K_DEFAULT",
+            default_value=10,
+            max_env="RETRIEVAL_TOP_K_MAX",
+            max_value=50,
+        )
+        stream_rerank_top_k = _effective_k(
+            requested=None,
+            default_env="RERANK_TOP_K_DEFAULT",
+            default_value=retrieval_top_k,
+            max_env="RERANK_TOP_K_MAX",
+            max_value=retrieval_top_k,
+        )
+        logger.debug(
+            "Effective k values (env-only stream): retrieval_top_k=%s rerank_top_k=%s file=%s",
+            retrieval_top_k,
+            stream_rerank_top_k,
+            file_name,
         )
 
         cached_result = await cache_manager.get_query_result(message, file_name)
@@ -581,12 +1035,12 @@ async def chat_stream(
             )
             return
 
-        matches, rewritten_query = await _resolve_retrieval(req, current_user, db)
+        matches, rewritten_query = await _resolve_retrieval(req, current_user, db, service, retrieval_top_k)
         docs = service._matches_to_documents(matches)
 
         if use_reranker and docs:
             docs = await asyncio.to_thread(
-                service.rerank, query=rewritten_query, docs=docs, top_k=min(len(docs), top_k)
+                service.rerank, query=rewritten_query, docs=docs, top_k=min(len(docs), stream_rerank_top_k)
             )
 
         full_text = ""

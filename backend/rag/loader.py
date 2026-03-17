@@ -187,13 +187,10 @@ class OptimizedPreprocessedLoader:
         suffix = path.suffix.lower()
 
         if suffix in {".pdf", ".docx"}:
-            try:
-                return self._load_via_docling(path, custom_metadata)
-            except Exception:
-                if suffix == ".pdf":
-                    page_contents, file_metadata = self._extract_pdf_with_pages(path)
-                else:
-                    page_contents, file_metadata = self._extract_docx_with_sections(path)
+            if suffix == ".pdf":
+                page_contents, file_metadata = self._extract_pdf_with_pages(path)
+            else:
+                page_contents, file_metadata = self._extract_docx_with_sections(path)
         elif suffix == ".txt":
             page_contents, file_metadata = self._extract_txt(path)
         elif suffix == ".md":
@@ -233,73 +230,6 @@ class OptimizedPreprocessedLoader:
 
         chunks = self._optimized_split_with_pages(docs_with_pages)
         return chunks
-
-    def _load_via_docling(self, path: Path, custom_metadata: Dict) -> List[Document]:
-        from docling.datamodel.base_models import InputFormat
-        from docling.document_converter import DocumentConverter, PdfFormatOption
-        from docling.datamodel.pipeline_options import PdfPipelineOptions, TableFormerMode
-
-        pipeline_options = PdfPipelineOptions(do_ocr=False, do_table_structure=True)
-        pipeline_options.table_structure_options.mode = TableFormerMode.FAST
-        pipeline_options.table_structure_options.do_cell_matching = False
-
-        converter = DocumentConverter(
-            format_options={
-                InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options),
-            }
-        )
-
-        result = converter.convert(str(path))
-        doc = result.document
-        md = doc.export_to_markdown()
-        md = self.preprocess_text(md)
-        md = self._normalize_markdown_headings(md)
-        if not md.strip():
-            return []
-
-        doc_id = self._generate_doc_id(str(path))
-        base_metadata = {
-            "source": str(path.absolute()),
-            "source_type": "file",
-            "file_type": path.suffix.lower()[1:],
-            "file_name": path.name,
-            "file_size": path.stat().st_size,
-            "loaded_at": datetime.now().isoformat(),
-            "doc_id": doc_id,
-            **custom_metadata,
-        }
-
-        split_level = int((os.getenv("SECTION_SPLIT_LEVEL", "2") or "2").strip() or "2")
-        sections = self._markdown_to_sections(md, split_level=split_level)
-        sections = self._merge_small_sections(sections)
-
-        section_docs: List[Document] = []
-        for i, section in enumerate(sections):
-            title = section.get("title") or ""
-            level = int(section.get("level") or 0)
-            body = section.get("content") or ""
-            content = body
-            if title:
-                prefix = "#" * max(1, min(level, 6))
-                content = f"{prefix} {title}\n\n{body}".strip()
-
-            if not content.strip():
-                continue
-
-            section_docs.append(
-                Document(
-                    page_content=content,
-                    metadata={
-                        **base_metadata,
-                        "section_index": i,
-                        "section_title": title,
-                        "section_level": level,
-                        "section_id": f"{doc_id}_section_{i}",
-                    },
-                )
-            )
-
-        return self._optimized_split(section_docs)
 
     @staticmethod
     def _markdown_to_sections(md: str, *, split_level: int = 2) -> List[Dict[str, object]]:

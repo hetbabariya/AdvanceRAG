@@ -17,11 +17,56 @@ interface ChatMessage {
     cached?: boolean;
 }
 
+type AgentActivityItem = {
+    id: string;
+    ts: number;
+    event: string;
+    step?: number;
+    max_steps?: number;
+    query?: string;
+    previous_query?: string;
+    docs?: number;
+    top_k?: number;
+    reason?: string;
+    tool_calls?: string[];
+    latency_s?: number;
+};
+
 const ChatInterface: React.FC<ChatInterfaceProps> = ({ fileName }) => {
     const [messages, setMessages] = useState<ChatMessage[]>([]);
     const [input, setInput] = useState('');
     const [loading, setLoading] = useState(false);
+    const [agentMode, setAgentMode] = useState(false);
+    const [agentActivity, setAgentActivity] = useState<AgentActivityItem[]>([]);
+    const [activityOpen, setActivityOpen] = useState(false);
     const messagesEndRef = useRef<HTMLDivElement>(null);
+
+    const formatAgentEvent = (e: AgentActivityItem) => {
+        const labelMap: Record<string, string> = {
+            step_start: 'Step started',
+            agent_decision: 'Agent decided',
+            rewrite: 'Rewrite query',
+            decompose: 'Decompose question',
+            retrieve: 'Retrieve docs',
+            rerank: 'Rerank',
+            adaptive_top_k: 'Adaptive top-k',
+            tool_validation_error: 'Tool validation',
+            answer_blocked: 'Answer blocked',
+            rerank_blocked: 'Rerank blocked',
+            max_steps_forced: 'Max steps forced',
+            stop: 'Stop',
+        };
+        const label = labelMap[e.event] || e.event;
+        const metaParts: string[] = [];
+        if (typeof e.step === 'number') metaParts.push(`step ${e.step}${e.max_steps ? `/${e.max_steps}` : ''}`);
+        if (typeof e.docs === 'number') metaParts.push(`docs ${e.docs}`);
+        if (typeof e.top_k === 'number') metaParts.push(`k ${e.top_k}`);
+        if (Array.isArray(e.tool_calls) && e.tool_calls.length > 0) metaParts.push(`tools ${e.tool_calls.join(', ')}`);
+        if (typeof e.latency_s === 'number') metaParts.push(`${e.latency_s.toFixed(2)}s`);
+        const meta = metaParts.join(' · ');
+        const detail = e.query || '';
+        return { label, meta, detail };
+    };
 
     useEffect(() => {
         const loadHistory = async () => {
@@ -60,6 +105,13 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ fileName }) => {
             loadHistory();
         }
     }, [fileName]);
+
+    useEffect(() => {
+        if (!agentMode) {
+            setAgentActivity([]);
+            setActivityOpen(false);
+        }
+    }, [agentMode]);
     const [streaming, setStreaming] = useState(false);
     const bufferRef = useRef<string>('');
     const revealedTextRef = useRef<string>('');
@@ -88,6 +140,8 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ fileName }) => {
         setLoading(true);
         bufferRef.current = '';
         revealedTextRef.current = '';
+        setAgentActivity([]);
+        setActivityOpen(false);
 
         setMessages(prev => [...prev, { id: messageId, sender: 'user', text: userText }]);
 
@@ -95,11 +149,12 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ fileName }) => {
             const params = new URLSearchParams({
                 message: userText,
                 file_name: fileName,
-                top_k: '10',
                 use_reranker: 'true',
             });
 
-            const response = await fetch(`/api/chat/stream?${params}`, {
+            const streamPath = agentMode ? '/api/chat/agent/stream' : '/api/chat/stream';
+
+            const response = await fetch(`${streamPath}?${params}`, {
                 method: 'GET',
                 credentials: 'include',
                 headers: { Accept: 'text/event-stream' },
@@ -157,6 +212,27 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ fileName }) => {
                                 setMessages(prev => [...prev, { id: aiId, sender: 'ai', text: '' }]);
                             }
                             bufferRef.current += event.text;
+                        } else if (event.type === 'agent') {
+                            if (agentMode) {
+                                const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+                                setAgentActivity(prev => {
+                                    const next = [...prev, {
+                                        id,
+                                        ts: Date.now(),
+                                        event: event.event,
+                                        step: event.step,
+                                        max_steps: event.max_steps,
+                                        query: event.query,
+                                        previous_query: event.previous_query,
+                                        docs: event.docs,
+                                        top_k: event.top_k,
+                                        reason: event.reason,
+                                        tool_calls: event.tool_calls,
+                                        latency_s: event.latency_s,
+                                    } as AgentActivityItem];
+                                    return next.slice(-30);
+                                });
+                            }
                         } else if (event.type === 'done') {
                             // Wait for buffer to clear before finishing
                             const waitFinish = setInterval(() => {
@@ -200,6 +276,53 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ fileName }) => {
         <div className="chat-interface">
             <div className="chat-header">
                 <h3>{fileName || 'New Chat'}</h3>
+                <div className="chat-header-right">
+                    {agentMode && (
+                        <div className="agent-activity-wrap">
+                            <button
+                                type="button"
+                                className="agent-activity-btn"
+                                onClick={() => setActivityOpen(v => !v)}
+                                disabled={loading || streaming}
+                            >
+                                Activity
+                                {agentActivity.length > 0 && (
+                                    <span className="agent-activity-count">{agentActivity.length}</span>
+                                )}
+                            </button>
+                            {activityOpen && agentActivity.length > 0 && (
+                                <div className="agent-activity-popover">
+                                    <div className="agent-activity-title">Agent Activity</div>
+                                    <div className="agent-activity-list">
+                                        {agentActivity.slice().reverse().slice(0, 12).map((a) => {
+                                            const f = formatAgentEvent(a);
+                                            return (
+                                                <div key={a.id} className="agent-activity-item">
+                                                    <div className="agent-activity-row">
+                                                        <span className="agent-activity-badge">{f.label}</span>
+                                                        {f.meta && <span className="agent-activity-meta">{f.meta}</span>}
+                                                    </div>
+                                                    {a.reason && <div className="agent-activity-reason">{a.reason}</div>}
+                                                    {f.detail && <div className="agent-activity-query">{f.detail}</div>}
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    )}
+                    <label className="agent-toggle">
+                        <input
+                            type="checkbox"
+                            checked={agentMode}
+                            onChange={(e) => setAgentMode(e.target.checked)}
+                            disabled={loading || streaming}
+                        />
+                        <span className="agent-toggle-ui" />
+                        <span className="agent-toggle-text">Agent</span>
+                    </label>
+                </div>
             </div>
 
             <div className="chat-messages-container">
@@ -268,10 +391,36 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ fileName }) => {
                                     </div>
                                 </div>
                                 <div className="message-bubble">
-                                    <div className="typing-indicator">
-                                        <span className="thinking-text">Thinking</span>
-                                        <span></span><span></span><span></span>
-                                    </div>
+                                    {agentMode ? (
+                                        <div className="agent-thinking">
+                                            <div className="agent-thinking-header">
+                                                <span className="agent-thinking-title">Agent Activity</span>
+                                                {agentActivity.length > 0 && (
+                                                    <span className="agent-thinking-count">{agentActivity.length}</span>
+                                                )}
+                                            </div>
+                                            <div className="agent-thinking-list">
+                                                {(agentActivity.length > 0 ? agentActivity.slice(-6) : [{ id: 'idle', ts: Date.now(), event: 'step_start' } as AgentActivityItem]).map((a) => {
+                                                    const f = formatAgentEvent(a);
+                                                    return (
+                                                        <div key={a.id} className="agent-thinking-item">
+                                                            <div className="agent-thinking-row">
+                                                                <span className="agent-thinking-badge">{f.label}</span>
+                                                                {f.meta && <span className="agent-thinking-meta">{f.meta}</span>}
+                                                            </div>
+                                                            {a.reason && <div className="agent-thinking-reason">{a.reason}</div>}
+                                                            {f.detail && <div className="agent-thinking-detail">{f.detail}</div>}
+                                                        </div>
+                                                    );
+                                                })}
+                                            </div>
+                                        </div>
+                                    ) : (
+                                        <div className="typing-indicator">
+                                            <span className="thinking-text">Thinking</span>
+                                            <span></span><span></span><span></span>
+                                        </div>
+                                    )}
                                 </div>
                             </div>
                         </div>

@@ -108,13 +108,24 @@ export const chatApi = {
     sendMessage: async (
         message: string,
         fileName: string,
-        topK: number = 10,
         useReranker: boolean = true
     ): Promise<ChatResponse> => {
         const response = await api.post('/chat', {
             message,
             file_name: fileName,
-            top_k: topK,
+            use_reranker: useReranker,
+        });
+        return response.data;
+    },
+
+    sendAgentMessage: async (
+        message: string,
+        fileName: string,
+        useReranker: boolean = true
+    ): Promise<ChatResponse> => {
+        const response = await api.post('/chat/agent', {
+            message,
+            file_name: fileName,
             use_reranker: useReranker,
         });
         return response.data;

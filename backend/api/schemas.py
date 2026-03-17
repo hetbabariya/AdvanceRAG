@@ -69,8 +69,9 @@ class URLIngestRequest(BaseModel):
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=4000)
     file_name: str = Field(min_length=1, max_length=260, description="The file to query against.")
-    top_k: int = Field(default=10, ge=1, le=200)
+    top_k: Optional[int] = Field(default=None, ge=1, le=200)
     use_reranker: bool = True
+    rerank_top_k: Optional[int] = Field(default=None, ge=1, le=200)
 
     model_config = {"populate_by_name": True}
 

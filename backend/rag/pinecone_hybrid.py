@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from pinecone import Pinecone, ServerlessSpec
 from pinecone_text.sparse import BM25Encoder
 from langchain_core.documents import Document
-from langchain_huggingface import HuggingFaceEmbeddings
+import httpx
 
 from backend.api.utils import get_logger
 
@@ -53,8 +53,10 @@ def init_bm25_template() -> BM25Encoder:
     with _BM25_LOCK:
         if _BM25_TEMPLATE is None:
             logger.info("Initializing BM25 template at startup...")
+            t0 = time.perf_counter()
             _BM25_TEMPLATE = BM25Encoder().default()
-            logger.info("BM25 template initialized successfully")
+            dt = time.perf_counter() - t0
+            logger.info("BM25 template initialized successfully (%.2fs)", dt)
     return _BM25_TEMPLATE
 
 
@@ -63,7 +65,93 @@ class HybridIndex:
     pc: Pinecone
     index_name: str
     index: Any
-    embedding: HuggingFaceEmbeddings
+    embedding: "HFInferenceEmbeddings"
+
+
+def _mean_pool(token_embeddings: List[List[float]]) -> List[float]:
+    if not token_embeddings:
+        return []
+    dim = len(token_embeddings[0])
+    if dim == 0:
+        return []
+    sums = [0.0] * dim
+    for vec in token_embeddings:
+        for i, v in enumerate(vec):
+            sums[i] += float(v)
+    n = float(len(token_embeddings))
+    return [v / n for v in sums]
+
+
+class HFInferenceEmbeddings:
+    def __init__(
+        self,
+        *,
+        model: str,
+        api_token: str,
+        timeout_s: float = 60.0,
+        batch_size: int = 16,
+    ):
+        self._model = (model or "").strip()
+        if not self._model:
+            raise ValueError("HF embedding model is empty")
+        self._token = (api_token or "").strip()
+        if not self._token:
+            logger.warning("HF_API_TOKEN missing, embeddings will be skipped")
+        self._timeout_s = timeout_s
+        self._batch_size = max(1, int(batch_size))
+
+    def _url(self) -> str:
+        # Prefer HF router endpoint (recommended by HF for unified inference routing)
+        return f"https://router.huggingface.co/hf-inference/models/{self._model}/pipeline/feature-extraction"
+
+    def _headers(self) -> Dict[str, str]:
+        headers = {"Content-Type": "application/json"}
+        if self._token:
+            headers["Authorization"] = f"Bearer {self._token}"
+        return headers
+
+    def _embed_one_or_many(self, inputs: List[str]) -> List[List[float]]:
+        if not self._token:
+            return [[] for _ in inputs]
+
+        payload: Dict[str, Any]
+        if len(inputs) == 1:
+            payload = {"inputs": inputs[0]}
+        else:
+            payload = {"inputs": inputs}
+
+        with httpx.Client(timeout=self._timeout_s) as client:
+            resp = client.post(self._url(), headers=self._headers(), json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+
+        def _to_vec(item: Any) -> List[float]:
+            # HF feature-extraction returns either:
+            # - pooled embedding: [dim]
+            # - token embeddings: [tokens][dim]
+            if not isinstance(item, list):
+                return []
+            if item and isinstance(item[0], list):
+                return _mean_pool(item)  # token-level → mean pooled
+            return [float(x) for x in item]
+
+        if len(inputs) == 1:
+            return [_to_vec(data)]
+        if isinstance(data, list):
+            return [_to_vec(x) for x in data]
+        return [[] for _ in inputs]
+
+    def embed_query(self, text: str) -> List[float]:
+        vecs = self._embed_one_or_many([text])
+        return vecs[0] if vecs else []
+
+    def embed_documents(self, texts: List[str]) -> List[List[float]]:
+        if not texts:
+            return []
+        out: List[List[float]] = []
+        for i in range(0, len(texts), self._batch_size):
+            out.extend(self._embed_one_or_many(texts[i : i + self._batch_size]))
+        return out
 
 
 def _safe_filename(name: str) -> str:
@@ -95,9 +183,24 @@ def ensure_index(
 def build_hybrid_index(
     *, pinecone_api_key: str, index_name: str, embedding_model: str, cloud: str, region: str
 ) -> HybridIndex:
-    embedding = HuggingFaceEmbeddings(model_name=embedding_model)
+    logger.info("Initializing HF Inference Embeddings (model=%s)...", embedding_model)
+    embedding = HFInferenceEmbeddings(
+        model=(embedding_model or os.getenv("HF_EMBEDDING_MODEL", "")),
+        api_token=(os.getenv("HF_API_TOKEN", "") or "").strip(),
+        timeout_s=float(os.getenv("HF_HTTP_TIMEOUT", "60") or "60"),
+        batch_size=int(os.getenv("HF_EMBED_BATCH_SIZE", "16") or "16"),
+    )
+
+    logger.info("Probing embedding dimension...")
     dim = len(embedding.embed_query("dimension probe"))
-    _get_bm25_template()
+    if dim <= 0:
+        raise ValueError(
+            "Embedding model returned an empty vector while probing dimension. "
+            "Check HF_API_TOKEN, HF_EMBEDDING_MODEL, and model availability on Hugging Face Inference API."
+        )
+    logger.info("Embedding dimension: %d", dim)
+
+    logger.info("Connecting to Pinecone...")
     pc = ensure_index(
         api_key=pinecone_api_key,
         index_name=index_name,
@@ -106,6 +209,8 @@ def build_hybrid_index(
         cloud=cloud,
         region=region,
     )
+    logger.info("Pinecone index ready: %s", index_name)
+
     index = pc.Index(index_name)
     return HybridIndex(pc=pc, index_name=index_name, index=index, embedding=embedding)
 

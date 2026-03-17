@@ -178,6 +178,79 @@ def parse_citations(
 
     try:
         # -------------------------------------------------------------------
+        # Legacy tag format: [citations]{...}{...}[/citations]
+        # Some models return a citations blob that should not be shown to users.
+        # We strip it from the answer text and try to parse the objects inside.
+        # -------------------------------------------------------------------
+        tag_match = re.search(r"\[citations\](.*?)\[/citations\]", raw_answer or "", flags=re.IGNORECASE | re.DOTALL)
+        if tag_match:
+            citations_blob = (tag_match.group(1) or "").strip()
+            stripped_answer = (re.sub(r"\[citations\].*?\[/citations\]", "", raw_answer or "", flags=re.IGNORECASE | re.DOTALL)).strip()
+
+            found_items: list[dict] = []
+            # The blob is often not valid JSON (objects concatenated without commas).
+            # Parse best-effort by extracting individual {...} objects.
+            for obj_str in re.findall(r"\{[^{}]*\}", citations_blob):
+                try:
+                    parsed = json.loads(obj_str)
+                    if isinstance(parsed, dict):
+                        found_items.append(parsed)
+                except Exception:
+                    continue
+
+            if found_items:
+                docs_map = {d.metadata.get("chunk_id"): d for d in docs if d.metadata}
+                missing_ids: list[str] = []
+                for c in found_items:
+                    cid = str(c.get("chunk_id") or "").strip()
+                    if cid and cid not in docs_map:
+                        missing_ids.append(cid)
+
+                if missing_ids and fetch_missing_fn is not None:
+                    try:
+                        fetched = fetch_missing_fn(ids=missing_ids)
+                        for d in fetched:
+                            cid = d.metadata.get("chunk_id")
+                            if cid:
+                                docs_map[cid] = d
+                    except Exception:
+                        pass
+
+                for idx, c in enumerate(found_items):
+                    num = c.get("number")
+                    try:
+                        number = int(num) if num is not None else (idx + 1)
+                    except Exception:
+                        number = idx + 1
+
+                    cid = str(c.get("chunk_id") or "").strip()
+                    src = str(c.get("source") or "").strip()
+                    if cid and cid in docs_map:
+                        d = docs_map[cid]
+                        citations.append(
+                            Citation(
+                                number=number,
+                                source=d.metadata.get("file_name") or src,
+                                chunk_id=cid,
+                                page_number=d.metadata.get("page_number"),
+                                text=d.page_content,
+                            )
+                        )
+                    else:
+                        citations.append(
+                            Citation(
+                                number=number,
+                                source=src,
+                                chunk_id=cid,
+                                text="Source content not available.",
+                            )
+                        )
+
+                # Prefer the stripped answer, but never return empty answer text.
+                answer_text = stripped_answer or answer_text
+                return answer_text, citations
+
+        # -------------------------------------------------------------------
         # Preferred format (JSON)
         # -------------------------------------------------------------------
         # The LLM is prompted via PydanticOutputParser to return ONLY JSON:
@@ -210,7 +283,20 @@ def parse_citations(
                     r"\\\\",
                     candidate_json,
                 )
-                payload = json.loads(cleaned_sanitized)
+                try:
+                    payload = json.loads(cleaned_sanitized)
+                except Exception:
+                    # Last-resort: extract the answer field even if JSON is malformed.
+                    # This prevents raw JSON (including citation objects) from being displayed to users.
+                    m = re.search(r'"answer"\s*:\s*"((?:\\.|[^"\\])*)"', candidate_json)
+                    if m:
+                        try:
+                            extracted = json.loads('"' + m.group(1) + '"')
+                        except Exception:
+                            extracted = m.group(1)
+                        answer_text = str(extracted).strip() or raw_answer
+                        return answer_text, citations
+                    raise
             if isinstance(payload, dict) and "answer" in payload and "citations" in payload:
                 answer_text = str(payload.get("answer") or "").strip() or raw_answer
                 raw_citations = payload.get("citations")
@@ -274,6 +360,17 @@ def parse_citations(
 
                 if citations:
                     return answer_text, citations
+
+        # If we reached here, JSON parsing did not yield citations. If the output looks like a JSON
+        # blob, try to extract and return only the answer field so the UI doesn't show raw objects.
+        if candidate_json and "\"answer\"" in candidate_json:
+            m = re.search(r'"answer"\s*:\s*"((?:\\.|[^"\\])*)"', candidate_json)
+            if m:
+                try:
+                    extracted = json.loads('"' + m.group(1) + '"')
+                except Exception:
+                    extracted = m.group(1)
+                answer_text = str(extracted).strip() or answer_text
 
         # -------------------------------------------------------------------
         # Legacy fallback format (plain text sections)
