@@ -7,7 +7,7 @@ from typing import Optional
 
 import bcrypt
 from dotenv import load_dotenv
-from fastapi import Cookie, Depends, HTTPException, status
+from fastapi import Cookie, Depends, Header, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
