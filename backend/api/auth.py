@@ -125,10 +125,21 @@ async def get_user_from_session(
 
     if cached_session:
         user_id = cached_session["user_id"]
-        expires_at = datetime.fromisoformat(cached_session["expires_at"])
+        try:
+            expires_at = datetime.fromisoformat(cached_session["expires_at"])
+            if expires_at.tzinfo:
+                expires_at = expires_at.replace(tzinfo=None)
+        except (ValueError, TypeError):
+            logger.error("Invalid expires_at format in cache: %s", cached_session.get("expires_at"))
+            await cache_manager.delete_session(session_token)
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid session data"
+            )
 
         # Check if session is expired
-        if datetime.fromisoformat(cached_session["expires_at"]).replace(tzinfo=None) < datetime.utcnow():
+        if expires_at < datetime.utcnow():
+            logger.warning("Session expired for user %d (cache)", user_id)
             await cache_manager.delete_session(session_token)
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
@@ -160,7 +171,12 @@ async def get_user_from_session(
         )
 
     # Check if session is expired
-    if session.expires_at.replace(tzinfo=None) < datetime.utcnow():
+    session_expires = session.expires_at
+    if session_expires.tzinfo:
+        session_expires = session_expires.replace(tzinfo=None)
+
+    if session_expires < datetime.utcnow():
+        logger.warning("Session expired for user %d (db)", session.user_id)
         await db.delete(session)
         await cache_manager.delete_session(session_token)
         raise HTTPException(
