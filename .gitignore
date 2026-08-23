@@ -24,3 +24,11 @@ frontend/dist/
 Thumbs.db
 test*
 requirements-dev.txt
+
+# Evals: corpus + raw artifacts stay local; datasets/golden.json is committed
+evals/corpus/
+evals/results/
+evals/datasets/candidates_raw.json
+
+# Large local-only corpus files (44MB+)
+data/d2l-en.pdf
