@@ -10,19 +10,19 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any, AsyncIterator, Dict, List, Optional, Protocol, Tuple
 
-from langchain_groq import ChatGroq
 from langchain_core.documents import Document
 from pydantic import BaseModel, Field
 from backend.rag.loader import OptimizedPreprocessedLoader
 from backend.rag.pinecone_hybrid import (
     HybridIndex,
-    bm25_path,
     load_bm25,
     query_hybrid,
     query_hybrid_global,
+    resolve_bm25_path,
     upsert_documents,
 )
 from backend.rag.settings import Settings
+from backend.rag.llm_factory import build_simple_llm
 from backend.api.utils import get_logger
 
 logger = get_logger(__name__)
@@ -34,95 +34,6 @@ class _LLM(Protocol):
     def invoke(self, prompt: str) -> _LLMResponse: ...
 
     def astream(self, prompt: str) -> AsyncIterator[_LLMResponse]: ...
-
-@dataclass
-class _TextResponse:
-    content: str
-
-class OpenRouterLLM:
-    def __init__(self, *, api_key: str, model: str, base_url: str, reasoning_enabled: bool):
-        from openai import OpenAI
-
-        self._client = OpenAI(base_url=base_url, api_key=api_key)
-        self._model = model
-        self._reasoning_enabled = reasoning_enabled
-
-    def invoke(self, prompt: str) -> _TextResponse:
-        kwargs: dict[str, Any] = {}
-        if self._reasoning_enabled:
-            kwargs["extra_body"] = {"reasoning": {"enabled": True}}
-
-        resp = self._client.chat.completions.create(
-            model=self._model,
-            messages=[{"role": "user", "content": prompt}],
-            **kwargs,
-        )
-        msg = resp.choices[0].message
-        return _TextResponse(content=(getattr(msg, "content", None) or "").strip())
-
-    async def astream(self, prompt: str) -> AsyncIterator[_TextResponse]:
-        loop = asyncio.get_running_loop()
-        q: asyncio.Queue[object] = asyncio.Queue()
-        sentinel = object()
-
-        def _run_streaming():
-            try:
-                kwargs: dict[str, Any] = {}
-                if self._reasoning_enabled:
-                    kwargs["extra_body"] = {"reasoning": {"enabled": True}}
-
-                stream = self._client.chat.completions.create(
-                    model=self._model,
-                    messages=[{"role": "user", "content": prompt}],
-                    stream=True,
-                    **kwargs,
-                )
-
-                for event in stream:
-                    token: Optional[str] = None
-                    try:
-                        delta = event.choices[0].delta
-                        token = getattr(delta, "content", None)
-                    except Exception:
-                        token = None
-
-                    if token:
-                        loop.call_soon_threadsafe(q.put_nowait, _TextResponse(content=str(token)))
-            except Exception as e:
-                loop.call_soon_threadsafe(q.put_nowait, e)
-            finally:
-                loop.call_soon_threadsafe(q.put_nowait, sentinel)
-
-        t = threading.Thread(target=_run_streaming, daemon=True)
-        t.start()
-
-        while True:
-            item = await q.get()
-            if item is sentinel:
-                break
-            if isinstance(item, Exception):
-                raise item
-            yield item  # type: ignore[misc]
-
-class FallbackLLM:
-    def __init__(self, *, primary: _LLM, fallback: _LLM):
-        self._primary = primary
-        self._fallback = fallback
-
-    def invoke(self, prompt: str) -> _LLMResponse:
-        try:
-            return self._primary.invoke(prompt)
-        except Exception:
-            return self._fallback.invoke(prompt)
-
-    async def astream(self, prompt: str) -> AsyncIterator[_LLMResponse]:
-        try:
-            async for chunk in self._primary.astream(prompt):
-                yield chunk
-            return
-        except Exception:
-            async for chunk in self._fallback.astream(prompt):
-                yield chunk
 
 
 def _truthy_env(name: str) -> bool:
@@ -255,31 +166,29 @@ class RagService:
     @classmethod
     def create(cls, settings: Settings, hybrid: HybridIndex) -> "RagService":
         loader = OptimizedPreprocessedLoader()
-        groq_llm = ChatGroq(model=os.getenv("GROQ_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct"))
-
-        openrouter_key = (os.getenv("OPENROUTER_API_KEY", "") or "").strip().strip('"').strip("'")
-        openrouter_model = (os.getenv("OPENROUTER_MODEL", "arcee-ai/trinity-large-preview:free") or "").strip()
-        openrouter_base_url = (os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1") or "").strip()
-        reasoning_raw = (os.getenv("OPENROUTER_REASONING_ENABLED", "true") or "").strip().lower()
-        reasoning_enabled = reasoning_raw not in {"0", "false", "no", "off"}
-
-        if openrouter_key:
-            primary = OpenRouterLLM(
-                api_key=openrouter_key,
-                model=openrouter_model,
-                base_url=openrouter_base_url,
-                reasoning_enabled=reasoning_enabled,
-            )
-            llm: _LLM = FallbackLLM(primary=primary, fallback=groq_llm)
-        else:
-            llm = groq_llm
+        llm = build_simple_llm()
         return cls(settings=settings, hybrid=hybrid, loader=loader, llm=llm)
 
     # ------------------------------------------------------------------
     # Ingestion
     # ------------------------------------------------------------------
-    def ingest_file(self, *, saved_path: str, original_name: str) -> Tuple[int, str]:
-        """Parse, embed, and upsert a file. Runs in a thread (CPU/IO-bound)."""
+    def ingest_file(
+        self,
+        *,
+        saved_path: str,
+        original_name: str,
+        file_hash: Optional[str] = None,
+        user_id: Optional[int] = None,
+        stage_cb=None,
+        embed_progress=None,
+    ) -> Tuple[int, str]:
+        """Parse, embed, and upsert a file. Runs in a thread (CPU/IO-bound).
+
+        ``file_hash`` makes the BM25 pickle name collision-safe; ``user_id``
+        stamps vectors so retrieval is scoped per owner; ``stage_cb`` receives
+        ingestion stage names ("embedding", "upserting"); ``embed_progress``
+        receives (chunks_embedded, total_chunks) during encoding.
+        """
         docs = self.loader.load_and_split_file(saved_path, original_name)
 
         if _truthy_env("PRINT_CHUNKS"):
@@ -290,6 +199,10 @@ class RagService:
             docs=docs,
             file_name=original_name,
             bm25_store_dir=self.settings.bm25_store_dir,
+            bm25_key=file_hash,
+            user_id=user_id,
+            stage_cb=stage_cb,
+            embed_progress=embed_progress,
         )
         return count, bm25_file
 
@@ -357,11 +270,10 @@ class RagService:
 
     rewrite_query = traceable(name="rag.rewrite_query")(rewrite_query)
 
-    def _get_bm25_for_file(self, file_name: str):
-
+    def _get_bm25_for_file(self, file_name: str, file_hash: Optional[str] = None):
         file_name = (file_name or "").strip()
-        path = bm25_path(self.settings.bm25_store_dir, file_name)
-        if not os.path.exists(path):
+        path = resolve_bm25_path(self.settings.bm25_store_dir, file_name, file_hash)
+        if not path:
             try:
                 available = []
                 if os.path.isdir(self.settings.bm25_store_dir):
@@ -370,7 +282,7 @@ class RagService:
                 available = []
             raise FileNotFoundError(
                 f"BM25 model not found for file: {file_name}. Ingest the file first. "
-                f"Expected path: {path}. Available BM25 files (first 40): {available}"
+                f"Searched in: {self.settings.bm25_store_dir}. Available BM25 files (first 40): {available}"
             )
         return _cached_load_bm25(path)
 
@@ -380,16 +292,24 @@ class RagService:
         query: str,
         file_name: str,
         top_k: int,
+        file_hash: Optional[str] = None,
+        user_id: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
-        """Local retrieval — scoped to a single file (hybrid dense+BM25)."""
+        """Local retrieval — scoped to a single file (hybrid dense+BM25).
+
+        ``file_hash`` disambiguates BM25 pickles when multiple users ingest
+        files with the same display name; ``user_id`` restricts Pinecone hits
+        to vectors owned by that user.
+        """
         file_name = (file_name or "").strip()
-        bm25 = self._get_bm25_for_file(file_name)
+        bm25 = self._get_bm25_for_file(file_name, file_hash)
         return query_hybrid(
             hybrid=self.hybrid,
             bm25=bm25,
             query=query,
             file_name=file_name,
             top_k=top_k,
+            user_id=user_id,
         )
 
     retrieve = traceable(name="rag.retrieve")(retrieve)
@@ -398,19 +318,19 @@ class RagService:
         self,
         *,
         query: str,
-        user_file_names: List[str],
+        user_id: int,
         top_k: int,
     ) -> List[Dict[str, Any]]:
         """Global retrieval — searches across all of the user's ingested files.
 
         Uses dense-only retrieval (no BM25) because there is no single BM25
-        model that spans multiple files. The ``$in`` filter ensures we never
-        surface another user's documents.
+        model that spans multiple files. The ``user_id`` filter guarantees we
+        never surface another user's documents.
         """
         return query_hybrid_global(
             hybrid=self.hybrid,
             query=query,
-            user_file_names=user_file_names,
+            user_id=user_id,
             top_k=top_k,
         )
 

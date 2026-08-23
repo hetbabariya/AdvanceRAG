@@ -55,6 +55,23 @@ class IngestResponse(BaseModel):
     cached: bool = False  # Whether file was loaded from cache
 
 
+class IngestAcceptedResponse(BaseModel):
+    """Returned when async ingestion is enabled (INGEST_ASYNC=1)."""
+    job_id: str
+    file_name: str
+    status: str = "queued"
+
+
+class IngestStatusResponse(BaseModel):
+    job_id: str
+    file_name: str
+    status: Literal["queued", "parsing", "embedding", "upserting", "completed", "failed"]
+    chunks_embedded: int = 0
+    total_chunks: int = 0
+    error: Optional[str] = None
+    result: Optional[IngestResponse] = None
+
+
 class IngestManyResponse(BaseModel):
     results: list[IngestResponse]
 

@@ -179,6 +179,10 @@ class OptimizedPreprocessedLoader:
 
         return self._optimized_split(docs)
 
+    def _chunking_strategy(self) -> str:
+        raw = (os.getenv("CHUNK_STRATEGY", "") or "").strip().lower()
+        return raw if raw in {"structural", "flat"} else "structural"
+
     def _load_from_file(self, file_path: str, custom_metadata: Dict) -> List[Document]:
         path = Path(file_path)
         if not path.exists():
@@ -186,15 +190,17 @@ class OptimizedPreprocessedLoader:
 
         suffix = path.suffix.lower()
 
-        if suffix in {".pdf", ".docx"}:
-            if suffix == ".pdf":
-                page_contents, file_metadata = self._extract_pdf_with_pages(path)
-            else:
-                page_contents, file_metadata = self._extract_docx_with_sections(path)
+        structural = False
+        if suffix == ".pdf":
+            page_contents, file_metadata = self._extract_pdf_structural(path)
+            structural = True
+        elif suffix == ".docx":
+            page_contents, file_metadata = self._extract_docx_with_sections(path)
         elif suffix == ".txt":
             page_contents, file_metadata = self._extract_txt(path)
         elif suffix == ".md":
             page_contents, file_metadata = self._extract_md(path)
+            structural = True
         else:
             raise ValueError(f"Unsupported format: {suffix}")
 
@@ -209,6 +215,15 @@ class OptimizedPreprocessedLoader:
             **file_metadata,
             **custom_metadata,
         }
+
+        if structural and self._chunking_strategy() == "structural":
+            cleaned_pages: List[Dict] = []
+            for page_info in page_contents:
+                text = self.preprocess_structural_text(page_info["text"])
+                if not text.strip():
+                    continue
+                cleaned_pages.append({"page_num": page_info["page_num"], "text": text})
+            return self._structural_chunks(cleaned_pages, base_metadata)
 
         docs_with_pages: List[Document] = []
         for page_info in page_contents:
@@ -231,129 +246,223 @@ class OptimizedPreprocessedLoader:
         chunks = self._optimized_split_with_pages(docs_with_pages)
         return chunks
 
-    @staticmethod
-    def _markdown_to_sections(md: str, *, split_level: int = 2) -> List[Dict[str, object]]:
-        lines = (md or "").splitlines()
-        sections: List[Dict[str, object]] = []
+    # ------------------------------------------------------------------
+    # Structure-aware parsing & chunking (PDF / Markdown)
+    # ------------------------------------------------------------------
 
-        current_title = ""
-        current_level = 0
-        current_lines: List[str] = []
+    _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)\s*$")
+    MIN_SECTION_TOKENS = 40
 
-        heading_re = re.compile(r"^(#{1,6})\s+(.*)\s*$")
+    def preprocess_structural_text(self, text: str) -> str:
+        """Light-touch cleanup for structure-aware parsing.
 
-        def _flush():
-            nonlocal current_title, current_level, current_lines
-            content = "\n".join(current_lines).strip()
-            if content:
-                sections.append(
-                    {
-                        "title": current_title,
-                        "level": current_level,
-                        "content": content,
-                    }
-                )
-            current_lines = []
-
-        for line in lines:
-            m = heading_re.match(line)
-            if m:
-                level = len(m.group(1))
-                title = (m.group(2) or "").strip()
-
-                if level <= max(1, min(split_level, 6)):
-                    _flush()
-                    current_level = level
-                    current_title = title
-                    continue
-
-                current_lines.append(line)
-                continue
-            current_lines.append(line)
-
-        _flush()
-        if not sections and md.strip():
-            return [{"title": "", "level": 0, "content": md.strip()}]
-        return sections
-
-    @staticmethod
-    def _normalize_markdown_headings(md: str) -> str:
-        if not md:
+        Applies unicode/encoding fixes only — whitespace collapsing would
+        destroy the markdown layout that heading detection depends on.
+        """
+        if not text:
             return ""
+        if self.config.get("fix_encoding_errors", False):
+            text = self._fix_encoding_errors(text)
+        if self.config.get("normalize_unicode", False):
+            text = unicodedata.normalize("NFKC", text)
+        return text
 
-        lines = md.splitlines()
-        out: List[str] = []
+    def _extract_pdf_structural(self, path: Path) -> Tuple[List[Dict], Dict]:
+        """Extract PDF as per-page markdown via pymupdf4llm (layout-aware).
+
+        Falls back to raw page.get_text() if pymupdf4llm is unavailable or fails.
+        """
+        try:
+            import pymupdf4llm
+
+            doc = pymupdf.open(path)
+            md_pages = pymupdf4llm.to_markdown(doc, page_chunks=True)
+
+            metadata: Dict = {
+                "parser": "pymupdf4llm",
+                "page_count": len(doc),
+                "author": doc.metadata.get("author", ""),
+                "title": doc.metadata.get("title", ""),
+                "subject": doc.metadata.get("subject", ""),
+                "keywords": doc.metadata.get("keywords", ""),
+                "creator": doc.metadata.get("creator", ""),
+                "creation_date": doc.metadata.get("creationDate", ""),
+                "modification_date": doc.metadata.get("modDate", ""),
+            }
+            doc.close()
+
+            page_contents: List[Dict] = []
+            for idx, item in enumerate(md_pages or []):
+                item = item if isinstance(item, dict) else {}
+                text = str(item.get("text") or "")
+                meta = item.get("metadata") or {}
+                try:
+                    page_num = int(meta.get("page", idx)) + 1  # 0-based → 1-based
+                except (TypeError, ValueError):
+                    page_num = idx + 1
+                if text.strip():
+                    page_contents.append({"page_num": max(1, page_num), "text": text})
+
+            return page_contents, {k: v for k, v in metadata.items() if v}
+        except Exception:
+            logger.exception(
+                "pymupdf4llm extraction failed for %s; falling back to raw PyMuPDF", path.name
+            )
+            return self._extract_pdf_with_pages(path)
+
+    def _split_sections(self, md: str) -> List[Dict[str, object]]:
+        """Split markdown into heading-delimited sections with char offsets."""
+        sections: List[Dict[str, object]] = []
+        lines = md.split("\n")
+        total_len = len(md)
+
+        line_offsets: List[int] = [0] * len(lines)
+        acc = 0
+        for i, ln in enumerate(lines):
+            line_offsets[i] = acc
+            acc += len(ln) + 1
+
+        def _flush(start_line: int, end_line: int, title: str, level: int) -> None:
+            if start_line >= end_line:
+                return
+            content = "\n".join(lines[start_line:end_line]).strip()
+            if not content:
+                return
+            sections.append({
+                "title": title,
+                "level": level,
+                "content": content,
+                "start_offset": line_offsets[start_line],
+                "end_offset": line_offsets[end_line] if end_line < len(lines) else total_len,
+            })
+
+        cur_title, cur_level, cur_start = "", 0, 0
         in_code = False
-
-        heading_inline_re = re.compile(r"#{1,6}")
-
-        for line in lines:
+        for i, line in enumerate(lines):
             if line.strip().startswith("```"):
                 in_code = not in_code
-                out.append(line)
                 continue
-
             if in_code:
-                out.append(line)
                 continue
+            m = self._HEADING_RE.match(line)
+            if m:
+                _flush(cur_start, i, cur_title, cur_level)
+                cur_title = (m.group(2) or "").strip()
+                cur_level = len(m.group(1))
+                cur_start = i
+        _flush(cur_start, len(lines), cur_title, cur_level)
 
-            s = line
-            parts: List[str] = []
-            i = 0
-            for m in heading_inline_re.finditer(s):
-                idx = m.start()
-                if idx == 0:
-                    continue
+        if not sections and md.strip():
+            return [{
+                "title": "",
+                "level": 0,
+                "content": md.strip(),
+                "start_offset": 0,
+                "end_offset": total_len,
+            }]
+        return sections
 
-                prev = s[idx - 1]
-                if prev.isalnum():
-                    continue
+    def _merge_tiny_sections(self, sections: List[Dict[str, object]]) -> List[Dict[str, object]]:
+        """Absorb sections smaller than MIN_SECTION_TOKENS into neighbours so
+        we don't emit one-line chunks for short headings."""
+        if len(sections) <= 1:
+            return sections
 
-                parts.append(s[i:idx])
-                parts.append("\n")
-                i = idx
+        merged: List[Dict[str, object]] = []
+        for sec in sections:
+            if merged and self._token_len(str(sec["content"])) < self.MIN_SECTION_TOKENS:
+                prev = merged[-1]
+                prev["content"] = f"{prev['content']}\n\n{sec['content']}".strip()
+                prev["end_offset"] = sec["end_offset"]
+            elif (
+                merged
+                and self._token_len(str(merged[-1]["content"])) < self.MIN_SECTION_TOKENS
+            ):
+                prev = merged[-1]
+                prev["content"] = f"{prev['content']}\n\n{sec['content']}".strip()
+                prev["end_offset"] = sec["end_offset"]
+            else:
+                merged.append(dict(sec))
+        return merged
 
-            parts.append(s[i:])
-            s2 = "".join(parts)
+    def _structural_chunks(self, pages: List[Dict], base_metadata: Dict) -> List[Document]:
+        """Section-aware chunking across page boundaries.
 
-            fixed_lines: List[str] = []
-            for ln in s2.splitlines():
-                ln2 = re.sub(r"^(#{1,6})(\S)", r"\1 \2", ln)
-                fixed_lines.append(ln2)
-            out.extend(fixed_lines)
+        Every chunk keeps its section title (prepended to the text) so the
+        embedding carries topical context even when a section is split.
+        """
+        parts: List[str] = []
+        page_marks: List[Tuple[int, int]] = []
+        cursor = 0
+        for p in pages:
+            text = p["text"].rstrip()
+            if not text.strip():
+                continue
+            page_marks.append((cursor, int(p["page_num"])))
+            parts.append(text)
+            cursor += len(text) + 2  # "\n\n" joiner
+        full_md = "\n\n".join(parts)
 
-        return "\n".join(out)
-
-    def _merge_small_sections(self, sections: List[Dict[str, object]]) -> List[Dict[str, object]]:
-        if not sections:
+        if not full_md.strip():
             return []
 
-        try:
-            import tiktoken
+        def _page_at(offset: int) -> int:
+            pg = page_marks[0][1] if page_marks else 1
+            for start, num in page_marks:
+                if offset >= start:
+                    pg = num
+                else:
+                    break
+            return pg
 
-            enc = tiktoken.get_encoding("cl100k_base")
-            def _tok_count(s: str) -> int:
-                return len(enc.encode(s or ""))
-        except Exception:
-            def _tok_count(s: str) -> int:
-                return len((s or "").split())
+        sections = self._merge_tiny_sections(self._split_sections(full_md))
 
-        preamble = sections[0]
-        pre_title = str(preamble.get("title") or "")
-        pre_level = int(preamble.get("level") or 0)
-        pre_content = str(preamble.get("content") or "")
+        final_chunks: List[Document] = []
+        chunk_counter = 0
+        doc_id = str(base_metadata.get("doc_id", "unknown"))
 
-        if pre_title or pre_level != 0:
-            return sections
+        for si, sec in enumerate(sections):
+            content = str(sec["content"]).strip()
+            if not content:
+                continue
+            title = str(sec["title"] or "")
+            prefix = f"{title}\n\n" if title else ""
 
-        if len(sections) < 2:
-            return sections
+            start_off = int(sec["start_offset"])
+            end_off = int(sec["end_offset"])
+            p_start = _page_at(start_off)
+            p_end = _page_at(max(end_off - 1, start_off))
+            page_label = str(p_start) if p_start == p_end else f"{p_start}-{p_end}"
 
-        next_sec = dict(sections[1])
-        next_content = str(next_sec.get("content") or "")
-        joiner = "\n\n" if pre_content.strip() and next_content.strip() else "\n"
-        next_sec["content"] = f"{pre_content}{joiner}{next_content}".strip()
-        return [next_sec, *sections[2:]]
+            if self._token_len(prefix + content) <= self.chunk_size:
+                pieces = [prefix + content]
+            else:
+                pieces = [f"{prefix}{piece}" for piece in self.splitter.split_text(content)]
+
+            for piece in pieces:
+                final_chunks.append(
+                    Document(
+                        page_content=piece,
+                        metadata={
+                            **base_metadata,
+                            "section_index": si,
+                            "section_title": title,
+                            "section_level": int(sec["level"]),
+                            "section_count": len(sections),
+                            "page_number": page_label,
+                            "page_start": p_start,
+                            "page_end": p_end,
+                            "chunk_index": chunk_counter,
+                            "chunk_id": f"{doc_id}_chunk_{chunk_counter}",
+                            "chunk_size": len(piece),
+                        },
+                    )
+                )
+                chunk_counter += 1
+
+        for chunk in final_chunks:
+            chunk.metadata["total_chunks"] = len(final_chunks)
+        return final_chunks
 
     def _token_len(self, text: str) -> int:
         try:

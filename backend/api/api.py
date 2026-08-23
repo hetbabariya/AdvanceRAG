@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import BackgroundTasks, Body, Cookie, Depends, File, HTTPException, Request, Response, UploadFile, status
+from fastapi.responses import JSONResponse
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 from sqlalchemy import delete, desc, select
@@ -14,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.api.auth import authenticate_user, create_session, create_user, delete_session, get_current_user
 from backend.api.cache import cache_manager
 from backend.api.database import get_db
+from backend.api.jobs import registry as job_registry
 from backend.api.models import ChatHistory, FileMetadata, User
 from backend.api.schemas import (
     CacheStatsResponse,
@@ -22,7 +24,9 @@ from backend.api.schemas import (
     ChatRequest,
     ChatResponse,
     FilesResponse,
+    IngestAcceptedResponse,
     IngestResponse,
+    IngestStatusResponse,
     URLIngestRequest,
     UserLogin,
     UserRegister,
@@ -37,7 +41,7 @@ from backend.api.utils import (
     safe_upload_path
 )
 from backend.rag.agent_graph import AgenticRagGraph
-from backend.rag.pinecone_hybrid import bm25_path
+from backend.rag.pinecone_hybrid import bm25_keyed_path, bm25_path, delete_file_vectors, resolve_bm25_path
 from backend.rag.service import RagService
 from backend.api.supabase_storage import delete_remote, download_to_file, upload_bytes, upload_file
 
@@ -232,26 +236,43 @@ async def _process_file_ingestion(
     file_hash: str,
     file_size: int,
     service: RagService,
+    user_id: Optional[int] = None,
+    job_id: Optional[str] = None,
 ) -> tuple[int, bool]:
     cached_file = await cache_manager.get_file_by_hash(file_hash)
     if cached_file:
-        cached_bm25_file = cached_file.get("bm25_file")
-        bm25_file = cached_bm25_file or bm25_path(service.settings.bm25_store_dir, original_name)
-        if not os.path.exists(bm25_file):
+        bm25_file = resolve_bm25_path(service.settings.bm25_store_dir, original_name, file_hash)
+        if not os.path.exists(bm25_file or ""):
             try:
                 remote_bm25 = f"bm25/{file_hash}.pkl"
-                download_to_file(remote_path=remote_bm25, local_path=bm25_file)
+                local_target = bm25_keyed_path(service.settings.bm25_store_dir, original_name, file_hash)
+                download_to_file(remote_path=remote_bm25, local_path=local_target)
+                bm25_file = local_target
             except Exception:
                 pass
-        if os.path.exists(bm25_file):
+        if bm25_file and os.path.exists(bm25_file):
             return cached_file.get("chunks_count", 0), True
         logger.info(
             "Cache hit for file_hash but BM25 model missing on disk; re-ingesting (file=%s)",
             original_name,
         )
 
+    def _stage(stage: str) -> None:
+        if job_id:
+            job_registry.update(job_id, status=stage)
+
+    def _progress(done: int, total: int) -> None:
+        if job_id:
+            job_registry.update(job_id, progress_done=done, progress_total=total)
+
     count, _bm25_path = await asyncio.to_thread(
-        service.ingest_file, saved_path=saved_path, original_name=original_name
+        service.ingest_file,
+        saved_path=saved_path,
+        original_name=original_name,
+        file_hash=file_hash,
+        user_id=user_id,
+        stage_cb=_stage if job_id else None,
+        embed_progress=_progress if job_id else None,
     )
 
     await cache_manager.set_file_hash(
@@ -266,9 +287,69 @@ async def _process_file_ingestion(
     return count, False
 
 
-@router.post("/ingest", response_model=IngestResponse)
+def _ingest_async_enabled() -> bool:
+    return (os.getenv("INGEST_ASYNC", "") or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+async def _run_ingest_job(
+    *,
+    job_id: str,
+    saved_path: str,
+    original_name: str,
+    file_hash: str,
+    file_size: int,
+    suffix: str,
+    content_type: str,
+    user_id: int,
+    service: RagService,
+) -> None:
+    """Background worker for async ingestion. Runs after the 202 response."""
+    from backend.api.database import AsyncSessionLocal
+
+    try:
+        count, cached = await _process_file_ingestion(
+            saved_path, original_name, file_hash, file_size, service, user_id=user_id, job_id=job_id
+        )
+
+        bm25_local = resolve_bm25_path(service.settings.bm25_store_dir, original_name, file_hash)
+        if not bm25_local:
+            raise RuntimeError("BM25 artifact missing after ingestion")
+        upload_file(
+            local_path=bm25_local,
+            remote_path=f"bm25/{file_hash}.pkl",
+            content_type="application/octet-stream",
+        )
+
+        async with AsyncSessionLocal() as db:
+            db.add(FileMetadata(
+                user_id=user_id,
+                file_name=original_name,
+                file_hash=file_hash,
+                file_size=file_size,
+                chunks_count=count,
+            ))
+            await db.commit()
+
+        job_registry.update(
+            job_id,
+            status="completed",
+            result={
+                "file_name": original_name,
+                "chunks_upserted": count,
+                "file_hash": file_hash,
+                "cached": cached,
+            },
+        )
+        logger.info("Async ingest completed '%s' for user %d: %d chunks", original_name, user_id, count)
+    except Exception as e:
+        logger.exception("Async ingest failed for '%s' (user %d)", original_name, user_id)
+        job_registry.update(job_id, status="failed", error=str(e))
+
+
+@router.post("/ingest")
 @traceable(name="pipeline.ingest")
 async def ingest(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -322,19 +403,40 @@ async def ingest(
             content_type=file.content_type or "application/octet-stream",
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to upload file to S3 Storage: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to upload file to Supabase Storage: {e}")
 
-    count, cached = await _process_file_ingestion(saved_path, file.filename, file_hash, file_size, service)
+    if _ingest_async_enabled():
+        job = job_registry.create(user_id=current_user.id, file_name=file.filename)
+        background_tasks.add_task(
+            _run_ingest_job,
+            job_id=job.id,
+            saved_path=saved_path,
+            original_name=file.filename,
+            file_hash=file_hash,
+            file_size=file_size,
+            suffix=suffix,
+            content_type=file.content_type or "application/octet-stream",
+            user_id=current_user.id,
+            service=service,
+        )
+        accepted = IngestAcceptedResponse(job_id=job.id, file_name=file.filename)
+        return JSONResponse(status_code=status.HTTP_202_ACCEPTED, content=_dump_model(accepted))
+
+    count, cached = await _process_file_ingestion(
+        saved_path, file.filename, file_hash, file_size, service, user_id=current_user.id
+    )
 
     try:
-        bm25_local_path = bm25_path(service.settings.bm25_store_dir, file.filename)
+        bm25_local_path = resolve_bm25_path(service.settings.bm25_store_dir, file.filename, file_hash)
+        if not bm25_local_path:
+            bm25_local_path = bm25_path(service.settings.bm25_store_dir, file.filename)
         upload_file(
             local_path=bm25_local_path,
             remote_path=f"bm25/{file_hash}.pkl",
             content_type="application/octet-stream",
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to upload BM25 artifact to S3 Storage: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to upload BM25 artifact to Supabase Storage: {e}")
 
     file_metadata = FileMetadata(
         user_id=current_user.id,
@@ -358,6 +460,23 @@ async def ingest(
         chunks_upserted=count,
         file_hash=file_hash,
         cached=cached,
+    )
+
+
+@router.get("/ingest/status/{job_id}", response_model=IngestStatusResponse)
+async def ingest_status(
+    job_id: str,
+    current_user: User = Depends(get_current_user),
+) -> IngestStatusResponse:
+    job = job_registry.get(job_id, user_id=current_user.id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    payload = job.to_dict()
+    result_payload = payload.pop("result", {}) or {}
+    return IngestStatusResponse(
+        **payload,
+        result=IngestResponse(**result_payload) if result_payload else None,
     )
 
 
@@ -411,6 +530,8 @@ async def ingest_youtube(
             docs=docs,
             file_name=display_name,
             bm25_store_dir=service.settings.bm25_store_dir,
+            bm25_key=url_hash,
+            user_id=current_user.id,
         )
     except Exception as e:
         logger.exception("YouTube ingestion failed for %s", url)
@@ -439,6 +560,7 @@ async def delete_file(
     file_name: str,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    service: RagService = Depends(get_rag_service),
 ):
     result = await db.execute(
         select(FileMetadata).where(
@@ -458,6 +580,17 @@ async def delete_file(
         delete_remote(remote_path=f"bm25/{file_metadata.file_hash}.pkl")
     except Exception:
         pass
+
+    # Best-effort removal of the file's vectors from Pinecone (user-scoped)
+    try:
+        await asyncio.to_thread(
+            delete_file_vectors,
+            hybrid=service.hybrid,
+            file_name=file_metadata.file_name,
+            user_id=current_user.id,
+        )
+    except Exception:
+        logger.exception("Failed to delete Pinecone vectors for '%s'", file_metadata.file_name)
 
     await db.execute(
         delete(ChatHistory).where(
@@ -482,7 +615,7 @@ async def _resolve_retrieval(
     db: AsyncSession,
     service: RagService,
     retrieval_top_k: int,
-) -> tuple[list, str]:
+) -> tuple[list, str, FileMetadata]:
     if not req.file_name:
         raise HTTPException(
             status_code=422, detail="file_name is required"
@@ -499,9 +632,10 @@ async def _resolve_retrieval(
         raise HTTPException(status_code=404, detail="File not found or access denied")
 
     try:
-        local_bm25 = bm25_path(service.settings.bm25_store_dir, req.file_name)
-        if not os.path.exists(local_bm25):
-            download_to_file(remote_path=f"bm25/{file_meta.file_hash}.pkl", local_path=local_bm25)
+        local_bm25 = resolve_bm25_path(service.settings.bm25_store_dir, req.file_name, file_meta.file_hash)
+        if not local_bm25:
+            local_target = bm25_keyed_path(service.settings.bm25_store_dir, req.file_name, file_meta.file_hash)
+            download_to_file(remote_path=f"bm25/{file_meta.file_hash}.pkl", local_path=local_target)
     except Exception:
         pass
 
@@ -517,6 +651,8 @@ async def _resolve_retrieval(
             query=rewritten_query,
             file_name=req.file_name,
             top_k=retrieval_top_k,
+            file_hash=file_meta.file_hash,
+            user_id=current_user.id,
         )
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -524,7 +660,7 @@ async def _resolve_retrieval(
         logger.exception("Local retrieval failed")
         raise HTTPException(status_code=500, detail=f"Retrieval failed: {e}")
 
-    return matches, rewritten_query
+    return matches, rewritten_query, file_meta
 
 
 @router.post("/chat", response_model=ChatResponse)
@@ -573,7 +709,7 @@ async def chat(
             cached=True,
         )
 
-    matches, rewritten_query = await _resolve_retrieval(req, current_user, db, service, retrieval_top_k)
+    matches, rewritten_query, _file_meta = await _resolve_retrieval(req, current_user, db, service, retrieval_top_k)
     docs = service._matches_to_documents(matches)
 
     if req.use_reranker and docs:
@@ -696,8 +832,8 @@ async def chat_agent(
         )
 
     try:
-        matches, _rewritten_for_bm25 = await _resolve_retrieval(req, current_user, db, service, retrieval_top_k)
-        _ = matches
+        _matches, _rewritten_for_bm25, file_meta = await _resolve_retrieval(req, current_user, db, service, retrieval_top_k)
+        _ = _matches
     except Exception:
         # _resolve_retrieval already raises proper HTTPException
         raise
@@ -707,7 +843,13 @@ async def chat_agent(
         retrieval_top_k=retrieval_top_k,
         rerank_top_k=rerank_top_k,
     )
-    agent_state = await asyncio.to_thread(agent.run, question=req.message, file_name=req.file_name)
+    agent_state = await asyncio.to_thread(
+        agent.run,
+        question=req.message,
+        file_name=req.file_name,
+        file_hash=file_meta.file_hash,
+        user_id=current_user.id,
+    )
     docs = list(agent_state.get("docs", []) or [])
     try:
         raw_answer = await asyncio.to_thread(service.generate, question=req.message, context_docs=docs)
@@ -856,7 +998,7 @@ async def chat_agent_stream(
                 )
                 return
 
-            await _resolve_retrieval(req, current_user, db, service, retrieval_top_k)
+            _m, _rq, file_meta = await _resolve_retrieval(req, current_user, db, service, retrieval_top_k)
 
             loop = asyncio.get_running_loop()
 
@@ -871,7 +1013,13 @@ async def chat_agent_stream(
             )
 
             agent_task = asyncio.create_task(
-                asyncio.to_thread(agent.run, question=message, file_name=file_name)
+                asyncio.to_thread(
+                    agent.run,
+                    question=message,
+                    file_name=file_name,
+                    file_hash=file_meta.file_hash,
+                    user_id=current_user.id,
+                )
             )
 
             while True:
@@ -1039,7 +1187,7 @@ async def chat_stream(
             )
             return
 
-        matches, rewritten_query = await _resolve_retrieval(req, current_user, db, service, retrieval_top_k)
+        matches, rewritten_query, _file_meta = await _resolve_retrieval(req, current_user, db, service, retrieval_top_k)
         docs = service._matches_to_documents(matches)
 
         if use_reranker and docs:

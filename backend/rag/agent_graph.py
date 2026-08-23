@@ -47,11 +47,10 @@ from langchain_core.messages import (
     ToolMessage,
 )
 from langchain_core.tools import tool
-from langchain_groq import ChatGroq
-from langchain_openai import ChatOpenAI
 from langgraph.graph import END, StateGraph
 
 from backend.api.utils import get_logger
+from backend.rag.llm_factory import build_tool_llm
 from backend.rag.service import RagService
 
 logger = get_logger(__name__)
@@ -80,23 +79,6 @@ def _truthy_env(name: str, default: bool = False) -> bool:
     if not raw:
         return default
     return raw not in {"0", "false", "no", "off"}
-
-
-def _pick_groq_model(raw: str) -> str:
-    name = (raw or "").strip()
-    if not name:
-        return "llama-3.3-70b-versatile"
-    low = name.lower()
-    forbidden = ("openai", "anthropic", "google", "mistral/")
-    if any(low.startswith(p) for p in forbidden):
-        return "llama-3.3-70b-versatile"
-    if "/" in low and not any(low.startswith(p) for p in ("llama", "gemma", "mixtral")):
-        return "llama-3.3-70b-versatile"
-    return name
-
-
-def _openrouter_key() -> str:
-    return (os.getenv("OPENROUTER_API_KEY") or "").strip().strip('"').strip("'")
 
 
 def _truncate(value: object, max_len: int = 180) -> str:
@@ -209,6 +191,8 @@ class AgentState(TypedDict, total=False):
     messages: List[BaseMessage]
     question: str
     file_name: str
+    file_hash: Optional[str]
+    user_id: Optional[int]
     query: str
     sub_queries: List[str]
     decompose_attempted: bool
@@ -319,17 +303,7 @@ class AgenticRagGraph:
         self._max_steps = max_steps if max_steps is not None else _int_env("AGENT_MAX_STEPS", 8)
         self._on_event = on_event
 
-        groq_model = _pick_groq_model(os.getenv("GROQ_AGENT_MODEL", "") or "")
-        self._groq_llm = ChatGroq(model=groq_model).bind_tools(_ALL_TOOLS)
-
-        openrouter_key = _openrouter_key()
-        self._use_openrouter = bool(openrouter_key)
-        if self._use_openrouter:
-            self._openrouter_llm = ChatOpenAI(
-                api_key=openrouter_key,
-                base_url=(os.getenv("OPENROUTER_BASE_URL") or "https://openrouter.ai/api/v1").strip(),
-                model=(os.getenv("OPENROUTER_AGENT_MODEL") or "stepfun/step-3.5-flash:free").strip(),
-            ).bind_tools(_ALL_TOOLS)
+        self._tool_llm, self._groq_llm, self._provider_cfg = build_tool_llm(_ALL_TOOLS)
 
         self._graph = self._build_graph()
 
@@ -337,7 +311,14 @@ class AgenticRagGraph:
     # Public API
     # ------------------------------------------------------------------
 
-    def run(self, *, question: str, file_name: str) -> AgentState:
+    def run(
+        self,
+        *,
+        question: str,
+        file_name: str,
+        file_hash: Optional[str] = None,
+        user_id: Optional[int] = None,
+    ) -> AgentState:
         state: AgentState = {
             "messages": [
                 SystemMessage(content=_SYSTEM_PROMPT),
@@ -345,6 +326,8 @@ class AgenticRagGraph:
             ],
             "question": question,
             "file_name": file_name,
+            "file_hash": file_hash,
+            "user_id": user_id,
             "query": question,
             "sub_queries": [],
             "decompose_attempted": False,
@@ -384,13 +367,18 @@ class AgenticRagGraph:
     # ------------------------------------------------------------------
 
     def _invoke_llm(self, messages: List[BaseMessage]) -> AIMessage:
-        if self._use_openrouter:
-            try:
-                resp = self._openrouter_llm.invoke(messages)
-                if isinstance(resp, AIMessage):
-                    return resp
-            except Exception:
-                logger.exception("OpenRouter failed; falling back to Groq")
+        try:
+            resp = self._tool_llm.invoke(messages)
+            if isinstance(resp, AIMessage):
+                return resp
+        except Exception:
+            logger.exception("%s failed", self._provider_cfg.name.capitalize())
+            if self._groq_llm is None:
+                raise
+        if self._groq_llm is None:
+            raise RuntimeError(
+                f"{self._provider_cfg.name} returned a non-AIMessage and no Groq fallback is configured"
+            )
         resp = self._groq_llm.invoke(messages)
         if isinstance(resp, AIMessage):
             return resp
@@ -600,13 +588,21 @@ class AgenticRagGraph:
     # ------------------------------------------------------------------
 
     def _retrieve_parallel(
-        self, sub_queries: List[str], file_name: str, top_k: int
+        self,
+        sub_queries: List[str],
+        file_name: str,
+        top_k: int,
+        *,
+        file_hash: Optional[str] = None,
+        user_id: Optional[int] = None,
     ) -> Tuple[List[Document], str]:
         all_docs: List[Document] = []
         seen: set[str] = set()
         for q in sub_queries:
             try:
-                matches = self._service.retrieve(query=q, file_name=file_name, top_k=top_k)
+                matches = self._service.retrieve(
+                    query=q, file_name=file_name, top_k=top_k, file_hash=file_hash, user_id=user_id
+                )
                 for d in self._service._matches_to_documents(matches):
                     key = (d.page_content or "")[:200]
                     if key and key not in seen:
@@ -723,13 +719,19 @@ class AgenticRagGraph:
                     self._emit({"event": "adaptive_top_k", "step": step, "top_k": top_k})
 
                 sub_queries = state.get("sub_queries") or []
+                file_hash = state.get("file_hash") or None
+                user_id = state.get("user_id")
                 t0 = time.time()
                 try:
                     # FIX BUG 4: only use parallel path when we have 2+ sub-queries
                     if len(sub_queries) >= 2:
-                        docs, summary = self._retrieve_parallel(sub_queries, file_name, top_k)
+                        docs, summary = self._retrieve_parallel(
+                            sub_queries, file_name, top_k, file_hash=file_hash, user_id=user_id
+                        )
                     else:
-                        matches = self._service.retrieve(query=query, file_name=file_name, top_k=top_k)
+                        matches = self._service.retrieve(
+                            query=query, file_name=file_name, top_k=top_k, file_hash=file_hash, user_id=user_id
+                        )
                         docs = self._service._matches_to_documents(matches)
                         summary = f"Retrieved {len(docs)} chunks."
                 except Exception as exc:
