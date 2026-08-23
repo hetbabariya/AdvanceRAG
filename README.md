@@ -112,11 +112,11 @@ flowchart TD
 |---|---|---|
 | **Frontend** | React 18, TypeScript, Vite | Fast DX, type-safe |
 | **Backend** | FastAPI (async) | Non-blocking I/O, auto docs |
-| **Database** | Supabase Postgres (asyncpg) | Managed, scalable |
-| **Storage** | Supabase Storage | Survives Render restarts |
+| **Database** | Postgres (asyncpg) via docker-compose locally, Supabase in production | Managed, scalable |
+| **Storage** | Local disk by default; optional Supabase Storage mirror | Local-first; mirror survives ephemeral hosts |
 | **Vector DB** | Pinecone | Managed ANN at scale |
 | **Cache** | Upstash Redis | Serverless Redis, TTL support |
-| **LLM** | Groq (llama-3) | Fastest inference available |
+| **LLM** | Groq (fallback) · OpenRouter · OmniRoute — switchable via `LLM_PROVIDER` | Free-tier speed; self-hosted routing option |
 | **Embeddings** | Sentence Transformers | Local, no API cost |
 | **Reranker** | Cross-Encoder | Precision layer on top of recall |
 | **Auth** | Session cookies (bcrypt + HTTP-only) | Secure, stateful |
@@ -129,9 +129,9 @@ flowchart TD
 
 Vector search excels at semantic similarity but fails on exact keyword matches — product IDs, names, rare tokens. BM25 catches what embeddings miss. Running both in parallel and merging top-K results consistently outperforms either approach alone.
 
-### Why Store BM25 as a Pickle in Supabase?
+### Why Store BM25 as a Pickle in Cloud Storage? (optional)
 
-Render's free tier uses ephemeral disks — a restart wipes local files. Serializing the BM25 index and uploading it to Supabase Storage means the backend can re-download it on cold start without re-indexing the entire document. This keeps ingestion a one-time cost.
+Local development keeps everything on disk. On ephemeral hosts (Render free tier), a restart wipes local files — so when `SUPABASE_STORAGE_ENABLED=1`, the BM25 index is serialized and uploaded to Supabase Storage, letting the backend re-download it on cold start without re-indexing the document. Ingestion stays a one-time cost.
 
 ### Why SHA-256 Hash Before Embedding?
 
@@ -194,14 +194,35 @@ Fill in `.env`:
 ```env
 GROQ_API_KEY=your_groq_key
 PINECONE_API_KEY=your_pinecone_key
+HF_API_TOKEN=your_hf_token      # embeddings via HF Inference API
 SECRET_KEY=your_secret_key   # python -c "import secrets; print(secrets.token_urlsafe(32))"
 
-SUPABASE_URL=https://<project>.supabase.co
-SUPABASE_SERVICE_ROLE_KEY=your_supabase_service_role_key
-SUPABASE_BUCKET=AllInOneRag
-SUPABASE_STORAGE_ENABLED=1
+REDIS_URL=redis://localhost:6379/0
 
-REDIS_URL=rediss://default:<password>@<host>:<port>
+# LLM provider selection
+#   auto (default) = OpenRouter if OPENROUTER_API_KEY is set, else Groq
+#   groq | openrouter | omniroute = force a provider (Groq stays the runtime fallback)
+LLM_PROVIDER=auto
+
+# Optional — OpenRouter (https://openrouter.ai/keys)
+# OPENROUTER_API_KEY=sk-or-your_key_here
+# OPENROUTER_MODEL=arcee-ai/trinity-large-preview:free
+# OPENROUTER_AGENT_MODEL=stepfun/step-3.5-flash:free
+
+# Optional — OmniRoute, self-hosted OpenAI-compatible router (default :20128)
+# OMNIROUTE_API_KEY=your_omniroute_key
+# OMNIROUTE_BASE_URL=http://localhost:20128/v1
+# OMNIROUTE_MODEL=cx/gpt-5.5
+# OMNIROUTE_AGENT_MODEL=          # defaults to OMNIROUTE_MODEL
+
+# Storage is LOCAL-FIRST — no cloud storage needed for development.
+# Raw files → backend_storage/uploads, BM25 pickles → backend_storage/bm25.
+#
+# Optional production mirror (ephemeral hosts):
+# SUPABASE_STORAGE_ENABLED=1
+# SUPABASE_URL=https://<project>.supabase.co
+# SUPABASE_SERVICE_ROLE_KEY=your_service_role_key
+# SUPABASE_BUCKET=AllInOneRag
 
 # Optional: query rewriting
 QUERY_REWRITE_ENABLED=true
