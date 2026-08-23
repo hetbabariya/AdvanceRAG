@@ -16,7 +16,7 @@ load_dotenv()
 logger = get_logger(__name__)
 
 # Database URL from environment
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+asyncpg://raguser:ragpassword@localhost:5432/allinonerag")
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+asyncpg://raguser:ragpassword@localhost:5432/askmydocs")
 
 # Create async engine with connection pooling
 engine = create_async_engine(

@@ -59,7 +59,7 @@ const Dashboard: React.FC = () => {
             <aside className="app-sidebar">
                 <div className="sidebar-header">
                     <div className="logo-container">
-                        <h2>AllinOneRAG</h2>
+                        <h2>AskMyDocs</h2>
                         <span className="badge-small">v2.0</span>
                     </div>
                     <button onClick={handleLogout} className="btn-icon" title="Logout">
@@ -107,7 +107,7 @@ const Dashboard: React.FC = () => {
                     <div className="empty-state-full">
                         <div className="empty-content">
                             <div className="app-logo-large">
-                                <h1>AllinOneRAG</h1>
+                                <h1>AskMyDocs</h1>
                             </div>
                             <p>Select a document from the sidebar to start chatting.</p>
                         </div>

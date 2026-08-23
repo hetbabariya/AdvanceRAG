@@ -31,7 +31,7 @@ const Login: React.FC = () => {
             <div className="auth-card card-glass fade-in">
                 <div className="auth-header">
                     <h1>Welcome Back</h1>
-                    <p className="text-gray-600">Sign in to continue to AllinOneRAG</p>
+                    <p className="text-gray-600">Sign in to continue to AskMyDocs</p>
                 </div>
 
                 <form onSubmit={handleSubmit} className="auth-form">

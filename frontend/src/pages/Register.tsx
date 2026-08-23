@@ -45,7 +45,7 @@ const Register: React.FC = () => {
             <div className="auth-card card-glass fade-in">
                 <div className="auth-header">
                     <h1>Create Account</h1>
-                    <p className="text-gray-600">Join AllinOneRAG today</p>
+                    <p className="text-gray-600">Join AskMyDocs today</p>
                 </div>
 
                 <form onSubmit={handleSubmit} className="auth-form">

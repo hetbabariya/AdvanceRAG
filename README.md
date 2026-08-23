@@ -1,7 +1,7 @@
-# AdvanceRAG — Local-First Document Intelligence Platform
+# AskMyDocs — Chat With Your Documents
 
 > **Upload documents. Ask questions. Get grounded answers with citations.**
-> A full-stack RAG system built for real-world RAG
+> A full-stack RAG system built for real-world document intelligence
 
 [![FastAPI](https://img.shields.io/badge/FastAPI-async-009688?logo=fastapi)](https://fastapi.tiangolo.com/)
 [![React](https://img.shields.io/badge/React-18-61DAFB?logo=react)](https://react.dev/)
@@ -184,8 +184,8 @@ I iterated on chunking because it had a direct impact on retrieval quality and c
 ### 1. Clone and configure
 
 ```bash
-git clone https://github.com/hetbabariya/AdvanceRAG
-cd AdvanceRAG
+git clone https://github.com/hetbabariya/AskMyDocs
+cd AskMyDocs
 cp .env.example .env
 ```
 
@@ -361,7 +361,7 @@ Set these environment variables:
 ```env
 LANGCHAIN_TRACING_V2=true
 LANGCHAIN_API_KEY=your_langsmith_api_key
-LANGCHAIN_PROJECT=AdvanceRAG
+LANGCHAIN_PROJECT=AskMyDocs
 ```
 
 ---
@@ -433,7 +433,7 @@ Make sure the reverse proxy supports SSE and disables buffering. (In Nginx, `pro
 ## Project Structure
 
 ```
-AllinOneRAG/
+AskMyDocs/
 ├── backend/
 │   ├── Dockerfile
 │   ├── requirements.txt

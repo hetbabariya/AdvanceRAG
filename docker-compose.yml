@@ -2,17 +2,17 @@ services:
   # ── Infrastructure ──────────────────────────────────────────────────
   postgres:
     image: postgres:16-alpine
-    container_name: allinonerag_postgres
+    container_name: askmydocs_postgres
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-raguser}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ragpassword}
-      POSTGRES_DB: ${POSTGRES_DB:-allinonerag}
+      POSTGRES_DB: ${POSTGRES_DB:-askmydocs}
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-raguser} -d ${POSTGRES_DB:-allinonerag}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-raguser} -d ${POSTGRES_DB:-askmydocs}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -20,7 +20,7 @@ services:
 
   redis:
     image: redis:7-alpine
-    container_name: allinonerag_redis
+    container_name: askmydocs_redis
     ports:
       - "6379:6379"
     volumes:
@@ -38,10 +38,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: allinonerag_backend
+    container_name: askmydocs_backend
     env_file: .env
     environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-raguser}:${POSTGRES_PASSWORD:-ragpassword}@postgres:5432/${POSTGRES_DB:-allinonerag}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-raguser}:${POSTGRES_PASSWORD:-ragpassword}@postgres:5432/${POSTGRES_DB:-askmydocs}
       REDIS_URL: redis://redis:6379/0
       ENVIRONMENT: production
     ports:

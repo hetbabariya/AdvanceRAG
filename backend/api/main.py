@@ -29,7 +29,7 @@ load_dotenv()
 
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("Starting AllinOneRAG API...")
+    logger.info("Starting AskMyDocs API...")
 
     # Create required directories
     required_dirs = ["backend_storage/bm25", "backend_storage/uploads"]
@@ -69,13 +69,13 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        logger.info("Shutting down AllinOneRAG API...")
+        logger.info("Shutting down AskMyDocs API...")
         await cache_manager.disconnect()
 
 
 # Create FastAPI app
 app = FastAPI(
-    title="AllinOneRAG API",
+    title="AskMyDocs API",
     description="Modern RAG system with session-based authentication and caching",
     version="1.0.0",
     lifespan=lifespan,
