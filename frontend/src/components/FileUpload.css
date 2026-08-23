@@ -103,6 +103,15 @@
     color: var(--text-secondary);
 }
 
+.upload-stage {
+    font-weight: 600;
+    color: var(--text-primary, #333);
+}
+
+.upload-percent {
+    font-variant-numeric: tabular-nums;
+}
+
 .upload-spinner {
     width: 18px;
     height: 18px;

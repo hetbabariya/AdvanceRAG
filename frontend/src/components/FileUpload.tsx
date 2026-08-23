@@ -12,6 +12,7 @@ const FileUpload: React.FC<FileUploadProps> = ({ onFileUploaded }) => {
     const [tab, setTab] = useState<Tab>('file');
     const [uploading, setUploading] = useState(false);
     const [progress, setProgress] = useState(0);
+    const [stage, setStage] = useState('Uploading');
     const [error, setError] = useState('');
     const [dragActive, setDragActive] = useState(false);
     const [urlInput, setUrlInput] = useState('');
@@ -28,13 +29,18 @@ const FileUpload: React.FC<FileUploadProps> = ({ onFileUploaded }) => {
         setError('');
         setUploading(true);
         setProgress(0);
+        setStage('Uploading');
         try {
-            const result = await filesAPI.uploadFile(file, (prog) => setProgress(prog));
+            const result = await filesAPI.uploadFile(file, (prog, st) => {
+                setProgress(prog);
+                setStage(st);
+            });
             onFileUploaded(result.file_name);
             setProgress(100);
+            setStage('Done');
             setTimeout(() => { setUploading(false); setProgress(0); }, 800);
         } catch (err: any) {
-            setError(err.response?.data?.detail || 'Upload failed');
+            setError(err.response?.data?.detail || err.message || 'Upload failed');
             setUploading(false);
             setProgress(0);
         }
@@ -123,7 +129,8 @@ const FileUpload: React.FC<FileUploadProps> = ({ onFileUploaded }) => {
                     {uploading ? (
                         <div className="upload-uploading">
                             <div className="upload-spinner" />
-                            <span>{progress}%</span>
+                            <span className="upload-stage">{stage}</span>
+                            <span className="upload-percent">{progress}%</span>
                             <div className="progress-bar">
                                 <div className="progress-fill" style={{ width: `${progress}%` }} />
                             </div>
