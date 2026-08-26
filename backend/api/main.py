@@ -110,9 +110,23 @@ app.include_router(router)
 
 # ========== Health Check ==========
 
-@app.get("/health", response_model=HealthResponse)
-async def health() -> HealthResponse:
-    """Health check endpoint."""
+@app.get("/health")
+async def health():
+    """Lightweight health check — no external dependencies.
+
+    Render uses this to detect whether the port is open and the process
+    is accepting HTTP requests.  It must return instantly, even if the
+    database or cache is still starting up.
+    """
+    return {"status": "ok"}
+
+
+@app.get("/health/detailed", response_model=HealthResponse)
+async def health_detailed() -> HealthResponse:
+    """Detailed health check — touches database and cache.
+
+    Use this for operational monitoring, not Render's startup probe.
+    """
     db_status = "ok" if await check_db_connection() else "error"
     cache_status = "ok" if await cache_manager.ping() else "error"
     return HealthResponse(

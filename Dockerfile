@@ -43,4 +43,5 @@ COPY . .
 RUN mkdir -p backend_storage/bm25 backend_storage/uploads
 
 # Render/Docker port handling
-CMD ["sh", "-c", "gunicorn -k uvicorn.workers.UvicornWorker backend.api.main:app --bind 0.0.0.0:${PORT:-8000} --workers 1 --threads 8 --timeout 0"]
+EXPOSE 10000
+CMD ["sh", "-c", "exec gunicorn -k uvicorn.workers.UvicornWorker backend.api.main:app --bind 0.0.0.0:${PORT:-10000} --workers 1 --timeout 0"]

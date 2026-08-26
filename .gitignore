@@ -32,3 +32,6 @@ evals/datasets/candidates_raw.json
 
 # Large local-only corpus files (44MB+)
 data/d2l-en.pdf
+
+# Notes / conversation docs
+notes/
